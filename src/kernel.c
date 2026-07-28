@@ -4,6 +4,7 @@
 #include "arm.h"
 #include "virtio.h"
 #include "vtinput.h"
+#include "vtgpu.h"
 #include "ata.h"
 #include "gfx.h"                /* rtc_read: exFAT timestamps entries */
 #include "exfat.h"
@@ -295,6 +296,15 @@ static void vga_flip(volatile uint32_t *vram,
     prev_valid = 1;
     /* the panel is device memory; make sure the writes have left */
     DSB();
+
+    /*
+     * A linear framebuffer is on screen the moment it is written. A
+     * virtio-gpu resource is not: the guest's pixels have to be
+     * transferred into the host's copy and that copy flushed to the
+     * display, so presenting is an explicit step rather than a
+     * consequence of storing.
+     */
+    if (vgpu_ready) vtgpu_present(0, 0, w, h);
 }
 
 static void fill_rect(uint32_t w, uint32_t x, uint32_t y,
@@ -388,24 +398,43 @@ void kmain(void) {
     mmu_report();
 
     CHK(1);
-    if (fb_request.response == NULL ||
-        fb_request.response->framebuffer_count < 1) {
-        serial_puts("[socrates/arm64] no framebuffer from Limine\n");
+    /*
+     * The display, preferring the one this kernel drives itself.
+     *
+     * virtio-gpu is tried before Limine's framebuffer rather than as a
+     * fallback from it, because the firmware path is the thing being
+     * escaped: EDK2's ramfb driver offers three modes and stops at
+     * 1024x768, and asking for more silently yields 800x600. Asking the
+     * GPU what the display is gets the real answer — and means the kernel
+     * needs no display support from the firmware at all, which is what
+     * running on hardware without a UEFI GOP will require.
+     *
+     * Limine's framebuffer remains the fallback, so a machine with only
+     * ramfb still boots to a desktop.
+     */
+    uint32_t panel_w = 0, panel_h = 0, pitch_px = 0;
+    volatile uint32_t *vram = 0;
+
+    if (vtgpu_init(1280, 800)) {
+        panel_w  = vgpu_w;
+        panel_h  = vgpu_h;
+        pitch_px = vgpu_w;
+        vram     = (volatile uint32_t *)vgpu_fb;
+    } else if (fb_request.response != NULL &&
+               fb_request.response->framebuffer_count >= 1) {
+        struct limine_framebuffer *fb = fb_request.response->framebuffers[0];
+        panel_w  = (uint32_t)fb->width;
+        panel_h  = (uint32_t)fb->height;
+        pitch_px = (uint32_t)(fb->pitch / (fb->bpp / 8));
+        vram     = (volatile uint32_t *)fb->address;
+        serial_puts("[socrates/arm64] display: firmware framebuffer\n");
+    } else {
+        serial_puts("[socrates/arm64] no display: no virtio-gpu and no framebuffer\n");
         halt_forever();
     }
 
-    struct limine_framebuffer *fb = fb_request.response->framebuffers[0];
-    uint32_t panel_w  = (uint32_t)fb->width;
-    uint32_t panel_h  = (uint32_t)fb->height;
-    uint32_t pitch_px = (uint32_t)(fb->pitch / (fb->bpp / 8));
-    volatile uint32_t *vram = (volatile uint32_t *)fb->address;
-
     serial_puts("[socrates/arm64] panel ");
     serial_put_u64(panel_w); serial_puts("x"); serial_put_u64(panel_h);
-    serial_puts("\n[socrates/arm64] fb addr "); serial_put_hex64((uint64_t)(uintptr_t)vram);
-    serial_puts(" pitch "); serial_put_u64(fb->pitch);
-    serial_puts(" bpp "); serial_put_u64(fb->bpp);
-    serial_puts("\n[socrates/arm64] fb PAR "); serial_put_hex64(mmu_probe_write((uint64_t)(uintptr_t)vram));
     serial_puts("\n");
     CHK(2);
 
@@ -449,6 +478,11 @@ void kmain(void) {
         }
 
         exfat_mount();
+        /* fs_open() dispatches on fs_kind, which fs_mount() sets. Mounting
+         * the volume without it leaves every path lookup going to the
+         * FAT32 branch of a filesystem that is not FAT32, and everything
+         * reports "file not found". */
+        fs_mount();
         serial_puts("[socrates/arm64] exFAT: ");
         if (exf_vol.mounted) {
             serial_puts("mounted, ");
@@ -532,8 +566,194 @@ void kmain(void) {
         }
     }
 
+    /*
+     * Hand the inference arena the largest usable region Limine reports.
+     *
+     * The model is hundreds of megabytes — far past anything that can be
+     * a static array — so the weights live in whatever the bootloader did
+     * not claim. The higher-half direct map is what makes the region
+     * addressable: it covers all of physical memory at a fixed offset, so
+     * a usable range becomes a pointer by adding the offset.
+     */
+    if (memmap_request.response && hhdm_request.response) {
+        uint64_t best_base = 0, best_len = 0, total = 0;
+        for (uint64_t i = 0; i < memmap_request.response->entry_count; i++) {
+            struct limine_memmap_entry *e = memmap_request.response->entries[i];
+            if (e->type != LIMINE_MEMMAP_USABLE) continue;
+            total += e->length;
+            if (e->length > best_len) { best_len = e->length; best_base = e->base; }
+        }
+        if (best_len > (16ull << 20)) {
+            llm_arena_init((void *)(uintptr_t)(hhdm_request.response->offset
+                                               + best_base), best_len);
+            serial_puts("[socrates/arm64] llm arena ");
+            serial_put_u64(best_len / (1024 * 1024));
+            serial_puts(" MiB of ");
+            serial_put_u64(total / (1024 * 1024));
+            serial_puts(" MiB usable\n");
+        }
+    }
+
+    /*
+     * Floating point, end to end, before anything depends on it.
+     *
+     * llm.c is the one translation unit compiled with FP enabled, and the
+     * only architecture-specific line in it is the square root. A wrong
+     * answer here means every normalisation and attention score in the
+     * model is wrong too, and that failure would otherwise surface as
+     * plausible-looking nonsense hundreds of megabytes and several
+     * minutes later.
+     */
+    {
+        uint32_t scaled = 0;
+        /* Returns 0 for success, like the rest of llm.c and unlike the
+         * neighbouring predicates — worth stating, because reading it as
+         * a boolean reports a passing FPU as broken. */
+        int rc = llm_fpu_selftest(&scaled);
+        serial_puts("[socrates/arm64] llm fpu selftest ");
+        serial_puts(rc == 0 ? "pass" : "FAIL");
+        serial_puts(" (x10000 = ");
+        serial_put_u64(scaled);
+        serial_puts(")\n");
+    }
+
     e1000_init(hhdm_request.response ? hhdm_request.response->offset : 0);
     netstack_init();
+
+#ifdef M6_SELFTEST
+    /*
+     * Milestone 6: the archive and the model, on real data.
+     *
+     * Both are the reason this port exists — they are the parts that were
+     * unusably slow under emulation on x86 — and both are large enough
+     * that "it compiles" says very little. This opens the actual 982 MB
+     * archive off the disk, reads an article out of it, then loads the
+     * 397 MB model and runs a token through it, reporting what each step
+     * produced rather than that it returned.
+     */
+    if (exf_vol.mounted) {
+        serial_puts("[socrates/arm64] m6: opening wiki.zim\n");
+        if (zim_open("/wiki.zim") == 0) {
+            serial_puts("[socrates/arm64] m6: zim v");
+            serial_put_u64(zim.major);
+            serial_puts(", ");
+            serial_put_u64(zim.article_count);
+            serial_puts(" entries, ");
+            serial_put_u64(zim.cluster_count);
+            serial_puts(" clusters, ");
+            serial_put_u64(zim.title_count);
+            serial_puts(" in the title listing\n");
+
+            /* Pull a real article body out, decompressing its cluster. */
+            const uint8_t *body = 0;
+            uint32_t blen = 0;
+            zim_dirent_t de;
+            uint32_t rank = zim.title_count > 8 ? 8 : 0;
+            uint32_t idx = zim_title_at(rank);
+            if (zim_content(idx, &body, &blen, &de) == 0) {
+                serial_puts("[socrates/arm64] m6: article \"");
+                serial_puts(de.title[0] ? de.title : de.url);
+                serial_puts("\" -> ");
+                serial_put_u64(blen);
+                serial_puts(" bytes\n");
+            } else {
+                serial_puts("[socrates/arm64] m6: article read failed - ");
+                serial_puts(zim_err);
+                serial_puts("\n");
+            }
+        } else {
+            serial_puts("[socrates/arm64] m6: zim open failed - ");
+            serial_puts(zim_err);
+            serial_puts("\n");
+        }
+
+        /* The model. Loading is incremental so the UI can show progress;
+         * here it just runs to completion and reports how long it took. */
+        serial_puts("[socrates/arm64] m6: loading qwen2.gguf\n");
+        const char *lerr = "?";
+        uint64_t t0 = timer_ms();
+
+        /*
+         * Two stages, and the first is easy to miss: llm_load() parses the
+         * GGUF's metadata — architecture, dimensions, tensor table,
+         * tokenizer — and only then does llm_load_begin() size the arena
+         * and start streaming the payload. Calling begin() first fails
+         * with "no model loaded", which reads like a missing file rather
+         * than a missing step.
+         *
+         * Both return 0 for success, as does llm_fpu_selftest and most of
+         * this codebase's lower layers — unlike the predicates next to
+         * them, which return 1. Reading either as a boolean inverts it.
+         */
+        static fs_file_t gguf;
+        int staged = 0;
+        if (fs_open("/qwen2.gguf", &gguf) != 0) {
+            serial_puts("[socrates/arm64] m6: cannot open /qwen2.gguf\n");
+        } else if (llm_load(llm_read_thunk, &gguf, gguf.size, &lerr) != 0) {
+            serial_puts("[socrates/arm64] m6: gguf metadata failed - ");
+            serial_puts(lerr); serial_puts("\n");
+        } else {
+            const llm_info_t *mi = llm_get_info();
+            serial_puts("[socrates/arm64] m6: gguf ok, n_embd ");
+            serial_put_u64(mi->n_embd);
+            serial_puts(", layers ");
+            serial_put_u64(mi->n_layer);
+            serial_puts(", vocab ");
+            serial_put_u64(mi->n_vocab);
+            serial_puts("\n");
+            staged = 1;
+        }
+
+        if (staged && llm_load_begin(&lerr) == 0) {
+            int done = 0, last_pct = -1;
+            while (!done) {
+                int r = llm_load_step(&lerr);
+                if (r < 0) break;
+                done = r;
+                int pct = llm_load_progress();
+                if (pct / 25 != last_pct / 25) {
+                    last_pct = pct;
+                    serial_puts("[socrates/arm64] m6: weights ");
+                    serial_put_u64((uint64_t)pct);
+                    serial_puts("%\n");
+                }
+            }
+            if (llm_weights_loaded()) {
+                serial_puts("[socrates/arm64] m6: weights resident in ");
+                serial_put_u64(timer_ms() - t0);
+                serial_puts(" ms\n");
+
+                /* One token, end to end: tokenise, evaluate, pick, detokenise. */
+                int32_t toks[16];
+                int nt = llm_encode("The capital of France is", toks, 16);
+                serial_puts("[socrates/arm64] m6: prompt is ");
+                serial_put_u64((uint64_t)nt);
+                serial_puts(" tokens\n");
+                uint64_t t1 = timer_ms();
+                for (int i = 0; i < nt; i++) {
+                    llm_eval_begin(toks[i], i);
+                    while (!llm_eval_step()) { }
+                }
+                int id = llm_argmax();
+                char piece[64];
+                llm_decode(id, piece, sizeof(piece));
+                serial_puts("[socrates/arm64] m6: next token = \"");
+                serial_puts(piece);
+                serial_puts("\" in ");
+                serial_put_u64(timer_ms() - t1);
+                serial_puts(" ms\n");
+            } else {
+                serial_puts("[socrates/arm64] m6: load failed - ");
+                serial_puts(lerr ? lerr : "?");
+                serial_puts("\n");
+            }
+        } else {
+            serial_puts("[socrates/arm64] m6: load_begin failed - ");
+            serial_puts(lerr ? lerr : "?");
+            serial_puts("\n");
+        }
+    }
+#endif
 
     display_boot_animation(vram, w, h, pitch_px);
     serial_puts("[socrates/arm64] boot animation done\n");

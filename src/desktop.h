@@ -717,17 +717,29 @@ static int execute_bin_internal(const char *filepath, int verbose) {
         app_win_title[ti] = '\0';
     }
 
-    uint64_t saved_rsp;
+    /*
+     * Run the app on its own stack, then put ours back.
+     *
+     * The x86 original is the same three instructions with different
+     * names. The clobber list is what makes it safe: every register the
+     * AAPCS lets a callee destroy is named, which forces the compiler to
+     * keep the saved stack pointer in one of x19-x28 — the ones the app
+     * is obliged to preserve. Naming a caller-saved register there
+     * instead would lose the kernel's stack the moment the app touched
+     * it, and the return would go somewhere arbitrary.
+     */
+    uint64_t saved_sp;
     __asm__ volatile(
-        "mov %%rsp, %[save]\n\t"
-        "mov %[stk], %%rsp\n\t"
-        "call *%[entry]\n\t"
-        "mov %[save], %%rsp\n\t"
-        : [save] "=&r"(saved_rsp)
+        "mov %[save], sp\n\t"
+        "mov sp, %[stk]\n\t"
+        "blr %[entry]\n\t"
+        "mov sp, %[save]\n\t"
+        : [save] "=&r"(saved_sp)
         : [stk] "r"(stack_top),
           [entry] "r"(entry_addr)
-        : "rdi", "rsi", "rdx", "rcx", "r8", "r9", "r10", "r11",
-          "rax", "memory", "cc"
+        : "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9",
+          "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "x18",
+          "x30", "memory", "cc"
     );
 
     wm_open(WK_HELLO);

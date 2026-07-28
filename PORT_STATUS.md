@@ -13,7 +13,7 @@ untouched and unaffected.
 | M3 | Storage — virtio-blk, exFAT | done (PCIe ECAM not needed, see below) |
 | M4 | Network — virtio-net, TCP/IP, HTTP, browser | done |
 | M5 | Userland — aarch64 `.bsd`, `svc #0` | done |
-| M6 | Model and Wikipedia | llm.c builds and links; not yet exercised |
+| M6 | Model and Wikipedia | done (see the speed caveat) |
 | M7 | Real hardware — Raspberry Pi | not started |
 
 Boot animation plays, the login screen renders and animates at a locked
@@ -100,20 +100,24 @@ the dock put it, which depends on the panel size and item count, so a
 coordinate-clicking test really tests the dock layout and fails for
 reasons unrelated to the browser.
 
-## Display: 1024x768, and why not more
+## Display: the kernel drives virtio-gpu
 
-`-device ramfb` with EDK2's QemuRamfbDxe offers a short fixed mode list,
-and 1024x768 is the top of it. Asking for anything larger does not scale
-down to the next mode — Limine finds no match and falls back to 800x600,
-which is how a request for 1280x800 produced the smallest useful panel.
+`src/vtgpu.h` talks to virtio-gpu over MMIO and creates its own scanout,
+so the display no longer comes from the firmware at all. Verified at
+1440x900 with no ramfb attached — `-device virtio-gpu-device,xres=,yres=`
+and the kernel asks the device what the display is.
 
-`-device virtio-gpu-pci` is the obvious alternative and does not work:
-this EDK2 build produces no GOP for it at all, so Limine reports no
-framebuffer and the kernel halts. Tested, not assumed.
+That exists because the firmware path has a ceiling. EDK2's ramfb driver
+offers three modes topping out at 1024x768, and asking for more does not
+degrade to the next one — Limine finds no match and falls back to
+800x600, so requesting a larger screen produced a smaller one.
+`-device virtio-gpu-pci` is no way out either: this EDK2 build produces
+no GOP for it, so Limine reports no framebuffer at all.
 
-Getting past 1024x768 therefore means a display path that does not depend
-on the firmware's GOP — driving virtio-gpu directly from the kernel, which
-is a real driver rather than a configuration change.
+Limine's framebuffer is still the fallback, so a ramfb-only machine boots
+to a desktop unchanged. Presenting costs two commands per frame
+(TRANSFER_TO_HOST_2D then RESOURCE_FLUSH) because a virtio-gpu resource
+is not on screen the moment it is written, unlike a linear framebuffer.
 
 ## Things that cost a lot to learn
 
@@ -158,6 +162,18 @@ the point of unification (`dc cvau`) and the instruction side invalidated
 loader has no equivalent and nothing hints that it is needed. Skipping it
 runs whatever was in that memory before — zeroes on the first load, the
 *previous* app on the second.
+
+**Four functions in this codebase return 0 for success while their
+neighbours return 1 for success.** `zim_find`, `exf_lookup`,
+`llm_fpu_selftest` and `llm_load_begin` have all been misread that way
+during this port, and each time the symptom was a component that appeared
+broken while working perfectly — a passing FPU reported as FAIL, a model
+that "would not load". Check the definition, not the shape of the name.
+
+**Loading a model is two calls, not one.** `llm_load()` parses the GGUF
+metadata; `llm_load_begin()`/`llm_load_step()` then stream the weights.
+Calling begin() first fails with "no model loaded", which reads like a
+missing file rather than a missing step.
 
 **Adding a device invalidates `build/efi-vars.fd`.** EDK2 stores the PCI
 path it booted from; a stale entry sends it to the UEFI shell, which looks
