@@ -817,6 +817,23 @@ static void wm_open(int kind) {
     win->w = wk_meta[kind].w;
     win->h = wk_meta[kind].h;
 
+    /*
+     * Fit the window to the screen it is opening on.
+     *
+     * wk_meta gives each window the size it would like, chosen when the
+     * only target was a panel comfortably larger than any of them. A
+     * smaller display makes those numbers wrong rather than merely
+     * generous: the window is placed centred, so an oversized one hangs
+     * off both edges at once and its right-hand controls become
+     * unreachable. Clamping to the usable area — what is left after the
+     * menu bar and the dock — costs four lines and means every window
+     * fits on every panel the firmware might hand us.
+     */
+    int32_t avail_w = (int32_t)scr_w_cache;
+    int32_t avail_h = (int32_t)scr_h_cache - MENUBAR_H - dock_cfg.bar_h;
+    if (avail_w > 0 && win->w > avail_w) win->w = avail_w;
+    if (avail_h > 0 && win->h > avail_h) win->h = avail_h;
+
     /* cascade around the center, per-kind offset */
     int32_t off = (kind % 3) * 28 - 28;
     int32_t off2 = (kind % 4) * 22 - 33;

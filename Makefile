@@ -37,7 +37,7 @@ ISO    := iso_root
 # the ISO is UEFI-only.
 FIRMWARE := /opt/homebrew/share/qemu/edk2-aarch64-code.fd
 
-RES ?= 1280x800x32
+RES ?= 1024x768x32
 
 .PHONY: all iso run clean FORCE
 

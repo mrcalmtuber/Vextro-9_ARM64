@@ -400,7 +400,9 @@ void kmain(void) {
     uint32_t pitch_px = (uint32_t)(fb->pitch / (fb->bpp / 8));
     volatile uint32_t *vram = (volatile uint32_t *)fb->address;
 
-    serial_puts("[socrates/arm64] fb addr "); serial_put_hex64((uint64_t)(uintptr_t)vram);
+    serial_puts("[socrates/arm64] panel ");
+    serial_put_u64(panel_w); serial_puts("x"); serial_put_u64(panel_h);
+    serial_puts("\n[socrates/arm64] fb addr "); serial_put_hex64((uint64_t)(uintptr_t)vram);
     serial_puts(" pitch "); serial_put_u64(fb->pitch);
     serial_puts(" bpp "); serial_put_u64(fb->bpp);
     serial_puts("\n[socrates/arm64] fb PAR "); serial_put_hex64(mmu_probe_write((uint64_t)(uintptr_t)vram));
@@ -562,6 +564,7 @@ void kmain(void) {
 
     int net_selftest_sent = 0, net_selftest_seen = 0;
     int desktop_mode = 0;
+    int auto_browser_done = 0;
     int net_fetch_started = 0, net_fetch_reported = 0;
 
 
@@ -688,6 +691,30 @@ void kmain(void) {
             }
 
             desktop_render(backbuf, w, h, mouse_x, mouse_y, mouse_buttons);
+
+#ifdef AUTO_BROWSER
+            /*
+             * Open the browser on a fixed URL, for the headless harness.
+             *
+             * After the first desktop_render, not before: the window
+             * manager sizes and centres a new window against the screen
+             * dimensions it caches during a render pass, so opening one
+             * earlier places it using a size of zero — which lands it off
+             * the edge of the panel. That is exactly the bug this build
+             * exists to catch, so the test must not reproduce it itself.
+             *
+             * Clicking a dock icon over QMP would mean knowing where the
+             * dock put it, which depends on the panel size and the item
+             * count, so a coordinate-clicking test really tests the dock
+             * layout. This uses the same entry point the dock does.
+             */
+            if (!auto_browser_done) {
+                auto_browser_done = 1;
+                wm_open(WK_BROWSER);
+                brw_navigate("http://example.com/");
+                serial_puts("[socrates/arm64] desktop: browser opened on example.com\n");
+            }
+#endif
             draw_cursor(w, h);
             vga_flip(vram, w, h, pitch_px);
             CHK(5);
@@ -727,23 +754,7 @@ void kmain(void) {
                 prev_valid = 0;
                 serial_puts("[socrates/arm64] desktop: entering\n");
                 pw_len = 0;
-#ifdef AUTO_BROWSER
-                /*
-                 * Open the browser on a fixed URL, for the headless
-                 * harness.
-                 *
-                 * Clicking a dock icon over QMP means knowing where the
-                 * dock put it, which depends on the panel size and the
-                 * item count — so a test that clicks coordinates is
-                 * really testing the dock layout, and fails for reasons
-                 * that have nothing to do with the browser. This opens
-                 * the same window through the same entry point the dock
-                 * uses and leaves the click path to a human.
-                 */
-                wm_open(WK_BROWSER);
-                brw_navigate("http://example.com/");
-                serial_puts("[socrates/arm64] desktop: browser opened on example.com\n");
-#endif
+
             } else if (ch >= 0x20 && ch < 0x7F && pw_len < (int)sizeof(pw) - 1) {
                 pw[pw_len++] = ch;
             }

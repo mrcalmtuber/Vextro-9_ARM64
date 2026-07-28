@@ -100,6 +100,21 @@ the dock put it, which depends on the panel size and item count, so a
 coordinate-clicking test really tests the dock layout and fails for
 reasons unrelated to the browser.
 
+## Display: 1024x768, and why not more
+
+`-device ramfb` with EDK2's QemuRamfbDxe offers a short fixed mode list,
+and 1024x768 is the top of it. Asking for anything larger does not scale
+down to the next mode — Limine finds no match and falls back to 800x600,
+which is how a request for 1280x800 produced the smallest useful panel.
+
+`-device virtio-gpu-pci` is the obvious alternative and does not work:
+this EDK2 build produces no GOP for it at all, so Limine reports no
+framebuffer and the kernel halts. Tested, not assumed.
+
+Getting past 1024x768 therefore means a display path that does not depend
+on the firmware's GOP — driving virtio-gpu directly from the kernel, which
+is a real driver rather than a configuration change.
+
 ## Things that cost a lot to learn
 
 **Limine maps no device memory.** It hands over with the MMU on and its own
