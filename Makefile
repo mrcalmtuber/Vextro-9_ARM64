@@ -120,10 +120,29 @@ else
 QEMU_CPU := -cpu cortex-a72
 endif
 
+# virtio-input over MMIO rather than PCI: the `-device` names ending in
+# -device (rather than -pci) bind to the virt machine's virtio-mmio
+# transports, which live in a region the kernel already maps. That keeps
+# input independent of the PCIe ECAM work that storage needs.
+#
+# force-legacy=false is not optional. qemu's virtio-mmio proxy still
+# defaults to the pre-1.0 layout, where the queue rings are one contiguous
+# allocation described by a page-frame number instead of three independent
+# physical addresses, and the config space is guest-endian. This driver
+# implements the 1.0 layout only, so without this the devices are present,
+# report version 1, and are skipped — which looks exactly like devices
+# that were never attached.
+#
+# The tablet is absolute, which is why the x86 build's VMware backdoor
+# driver has no counterpart here — the pointer tracks the host cursor
+# without a grab, and there is nothing to calibrate.
 QEMU_COMMON := -M virt -m 2048 $(QEMU_CPU) -accel $(ACCEL) \
 	-drive if=pflash,format=raw,unit=0,readonly=on,file=$(FIRMWARE) \
 	-drive if=pflash,format=raw,unit=1,file=build/efi-vars.fd \
 	-device ramfb \
+	-global virtio-mmio.force-legacy=false \
+	-device virtio-keyboard-device \
+	-device virtio-tablet-device \
 	-cdrom os.iso
 
 # EDK2 keeps its variables in a second flash bank; it wants one the same

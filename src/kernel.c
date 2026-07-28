@@ -2,6 +2,8 @@
 #include <stddef.h>
 #include "limine.h"
 #include "arm.h"
+#include "virtio.h"
+#include "vtinput.h"
 #include "ttf.h"
 #include "login.h"
 #include "boot_animation.h"
@@ -98,19 +100,6 @@ static int      prev_valid = 0;
 
 #define COLOR_BLACK 0x000000u
 #define COLOR_GOLD  0xD4AF37u
-
-/*
- * Pointer state.
- *
- * The real driver is virtio-input in M2. Until then these exist so the
- * portable login screen — which reads them to steer its vortex — links
- * and animates. Declaring them here rather than stubbing login.h keeps
- * that file byte-identical to the x86 tree, which is the whole point of
- * the 63% that ports untouched.
- */
-volatile int32_t mouse_x = 0;
-volatile int32_t mouse_y = 0;
-volatile uint8_t mouse_buttons = 0;
 
 static void halt_forever(void) {
     for (;;) __asm__ volatile("wfi");
@@ -297,8 +286,7 @@ void kmain(void) {
     display_boot_animation(vram, w, h, pitch_px);
     serial_puts("[socrates/arm64] boot animation done\n");
 
-    mouse_x = (int32_t)(w / 2);
-    mouse_y = (int32_t)(h / 2);
+    vtinput_init((int32_t)w, (int32_t)h);
 
     /*
      * Render loop, paced against the counter.
@@ -313,18 +301,53 @@ void kmain(void) {
     uint64_t frames = 0;
     uint64_t last_report_ms = timer_ms();
 
+    /* What has been typed so far. The login screen renders it as dots;
+     * checking it against a password is desktop.h's job, and arrives with
+     * the milestone that brings the desktop up. */
+    char pw[64] = {0};
+    int  pw_len = 0;
+
+    int32_t last_mx = -1, last_my = -1;
+    uint8_t last_mb = 0;
+
 
     for (;;) {
-        /* No keyboard yet, so nothing can be typed; drift the pointer
-         * slowly so the vortex visibly responds and the loop's liveness
-         * is obvious on screen rather than only on the serial line. */
-        uint32_t t = (uint32_t)frames;
-        mouse_x = (int32_t)(w / 2) +
-                  (int32_t)int_sin[(t * 2) % 360] * (int32_t)(w / 4) / TRIG_SCALE;
-        mouse_y = (int32_t)(h / 2) +
-                  (int32_t)int_cos[(t * 3) % 360] * (int32_t)(h / 4) / TRIG_SCALE;
+        /* Poll phase. Devices are drained once per frame rather than from
+         * an interrupt: the loop already visits everything every 16 ms,
+         * and a used-ring index costs less to read than an interrupt
+         * costs to route. */
+        vtinput_poll();
 
-        login_render(backbuf, w, h, mouse_x, mouse_y, "",
+        /* Report the pointer only when it moves. A per-frame log would
+         * bury everything else at 60 Hz, and the interesting question —
+         * does a host coordinate arrive as the same coordinate here — is
+         * about transitions, not steady state. */
+        if (mouse_x != last_mx || mouse_y != last_my ||
+            mouse_buttons != last_mb) {
+            last_mx = mouse_x; last_my = mouse_y; last_mb = mouse_buttons;
+            serial_puts("[socrates/arm64] pointer ");
+            serial_put_u64((uint64_t)(uint32_t)last_mx);
+            serial_puts(",");
+            serial_put_u64((uint64_t)(uint32_t)last_my);
+            serial_puts(" buttons ");
+            serial_put_u64(last_mb);
+            serial_puts("\n");
+        }
+
+        /* Echo what has been typed, so the field fills in as keys land. */
+        char ch;
+        while ((ch = kb_getchar()) != 0) {
+            if (ch == '\b') {
+                if (pw_len > 0) pw_len--;
+            } else if (ch == '\n') {
+                pw_len = 0;
+            } else if (ch >= 0x20 && ch < 0x7F && pw_len < (int)sizeof(pw) - 1) {
+                pw[pw_len++] = ch;
+            }
+            pw[pw_len] = '\0';
+        }
+
+        login_render(backbuf, w, h, mouse_x, mouse_y, pw,
                      mouse_buttons, "Socrates BSD 9 - ARM64");
         if (frames == 0) CHK(4);
 
