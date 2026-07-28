@@ -1,287 +1,123 @@
-CC      := x86_64-elf-gcc
-LD      := x86_64-elf-ld
-HOSTCC  := cc
-
-CFLAGS  := -O2 -Wall -Wextra -ffreestanding -fno-stack-protector \
-            -fno-stack-check -fno-lto -fPIE -m64 -march=x86-64 \
-            -mno-80387 -mno-mmx -mno-sse -mno-sse2 -mno-red-zone \
-            -Isrc -Ikernel/include -Ibsdfmt
-
-# --- Display mode ---
-# `resolution` is the key Limine actually reads, and it matches the card's
-# advertised VBE mode list *exactly* — ask for a mode the card does not
-# list and it silently lands on 1024x768.  (1280x832, the exact half of a
-# 2560x1664 Retina panel, is one such mode: verified unavailable even
-# with EDID hints, which is why it is not offered here.)
+# Socrates BSD 9 — ARM64
 #
-# NATIVE=1 renders at the panel's own resolution so the host never
-# resamples the guest at all — a 1:1 image with a thin letterbox rather
-# than a 1280x800 one filtered up. It costs four times the software fill
-# and more VGA memory than QEMU's 16 MB default, so it is opt-in:
-#     make run NATIVE=1
-NATIVE ?= 0
+# The x86_64 build is preserved as Makefile.x86.ref. This one grows a
+# milestone at a time rather than being ported wholesale, so that every
+# commit produces something that boots.
+#
+# Milestone 0: kernel, UEFI ISO, framebuffer.
 
-ifeq ($(NATIVE),1)
-RES      ?= 2560x1600x32
-FB_MAX_W ?= 2560
-FB_MAX_H ?= 1600
-QEMU_VGA := -device VGA,vgamem_mb=32,edid=on,xres=2560,yres=1600
-else
-RES      ?= 1280x800x32
-FB_MAX_W ?= 1920
-FB_MAX_H ?= 1080
-QEMU_VGA := -vga std
-endif
+CC   := aarch64-elf-gcc
+LD   := aarch64-elf-ld
 
-# The back buffer, the previous frame and the wallpaper cache are all
-# statically sized, so the bound is a build option rather than a constant.
-CFLAGS  += -DBUF_MAX_W=$(FB_MAX_W)  -DBUF_MAX_H=$(FB_MAX_H) \
-           -DWALL_MAX_W=$(FB_MAX_W) -DWALL_MAX_H=$(FB_MAX_H)
+# -mgeneral-regs-only is the aarch64 counterpart of the x86 build's
+# -mno-sse/-mno-80387 pile, and a stricter one: it bars the compiler from
+# touching the FP/SIMD registers anywhere in the kernel, so no interrupt
+# handler can quietly acquire a floating-point dependency. The inference
+# translation unit is the single exception and is built without it.
+CFLAGS := -O2 -Wall -Wextra -ffreestanding -fno-stack-protector \
+          -fno-stack-check -fno-lto -fno-pie -mgeneral-regs-only \
+          -Isrc -Ikernel/include -Ibsdfmt
 
-LDFLAGS := -nostdlib -static -pie --no-dynamic-linker -z text \
-            -T linker.ld
+# Linked as a plain ET_EXEC at a fixed higher-half address, not a PIE.
+#
+# The x86 build passes -pie but its linker quietly produces ET_EXEC
+# anyway; aarch64-elf-ld honours the flag, and the result is an ET_DYN
+# whose .dynamic section has no PT_DYNAMIC program header to describe it,
+# because the PHDRS block in linker.ld declares only the four PT_LOADs.
+# Limine rejects that, correctly. Since the kernel is loaded at one fixed
+# address either way, saying ET_EXEC outright is clearer than depending on
+# a linker's fallback.
+LDFLAGS := -nostdlib -static -no-pie -z text -T linker.ld
 
-# -fno-tree-loop-distribute-patterns: without it GCC turns clear loops
-# into memset calls, and there is no libc to link them against.
-APP_CFLAGS := -O2 -Wall -ffreestanding -fno-stack-protector \
-              -fno-stack-check -mno-80387 -mno-mmx -mno-sse -mno-sse2 \
-              -mno-red-zone -fPIC -fno-tree-loop-distribute-patterns
+LIMINE := limine-binary
+ISO    := iso_root
 
-LIMINE  := limine-binary
-ISO     := iso_root
+# UEFI firmware for QEMU's virt machine. ARM has no BIOS, so unlike the
+# x86 build there is no El Torito BIOS image and no boot-sector install —
+# the ISO is UEFI-only.
+FIRMWARE := /opt/homebrew/share/qemu/edk2-aarch64-code.fd
 
-# --- App store packages ---
-# Every package is a .bsd image (see bsdfmt/): compiled to ELF64, then
-# repacked by bsd_maker into the container the store and the kernel's
-# loader both speak.  Seeded onto the disk under /store/pkg, which is the
-# repository the Agora store installs from.  `voronoi` is deliberately
-# left out so it is only reachable over the network (see `make repo`).
-STORE_APPS  := mandel orbit life plasma
-REPO_APPS   := $(STORE_APPS) voronoi
-STORE_BINS  := $(addprefix build/store/,$(addsuffix .bsd,$(STORE_APPS)))
-REPO_BINS   := $(addprefix build/store/,$(addsuffix .bsd,$(REPO_APPS)))
+RES ?= 1280x800x32
 
-BSD_MAKER   := bsdfmt/bsd_maker
-
-# --- Pictures ---
-# PNG in, .sci out (row filters + LZMA, see src/sci.h).  tools/mkimg.py
-# decodes PNG with Python's own zlib, so there is no image dependency.
-PIC_SRC     := $(wildcard apps/pics/*.png)
-PIC_SCI     := $(patsubst apps/pics/%.png,build/pics/%.sci,$(PIC_SRC))
-PIC_NAMES   := $(notdir $(basename $(PIC_SRC)))
-
-.PHONY: all iso run clean cleandisk apps repo bsdtools pics FORCE
+.PHONY: all iso run clean FORCE
 
 FORCE:
 
-all: os.iso disk.img
-
-apps: $(REPO_BINS)
-
-pics: $(PIC_SCI)
-
-bsdtools: $(BSD_MAKER) bsdfmt/bsd_run
-
-# --- exFAT system disk ---
-# exFAT rather than FAT32 because FAT32 caps a single file at 4 GB, and
-# an offline encyclopedia is far past that.  The image is sparse, so an
-# 8 GB volume costs only the few megabytes actually used.
-#
-# Created once and then left alone: it is the OS's writable, persistent
-# filesystem. `make cleandisk` resets it to factory contents.
-DISK_MB ?= 8192
-
-disk.img: | build/hello $(STORE_BINS) $(PIC_SCI)
-	python3 tools/mkexfat.py disk.img $(DISK_MB) \
-		apps/about.txt apps/notes.txt build/hello \
-		apps/welcome.txt:docs/welcome.txt \
-		$(foreach a,$(STORE_APPS),build/store/$(a).bsd:store/pkg/$(a).bsd) \
-		$(foreach p,$(PIC_NAMES),build/pics/$(p).sci:pics/$(p).sci)
-
-cleandisk:
-	rm -f disk.img
-	$(MAKE) disk.img
-
-# --- Network package repository (http://10.0.2.2:8000 from the guest) ---
-repo: $(REPO_BINS)
-	python3 tools/serve_repo.py --out build/repo $(REPO_BINS)
-
-# --- Host Limine tool (needed for BIOS boot-sector install) ---
-build/limine-tool: $(LIMINE)/limine.c
-	@mkdir -p build
-	$(HOSTCC) -O2 -o $@ $<
-
-# --- User app: hello ---
-build/hello.o: apps/hello.c apps/socrates.h
-	@mkdir -p build
-	$(CC) $(APP_CFLAGS) -c $< -o $@
-
-build/hello: build/hello.o apps/app.ld
-	$(LD) -nostdlib -static -T apps/app.ld build/hello.o -o $@
-
-# --- .bsd toolchain (host) ---
-$(BSD_MAKER): bsdfmt/bsd_maker.c bsdfmt/bsd_format.h
-	$(HOSTCC) -O2 -Wall -Wextra -std=gnu11 -o $@ $<
-
-bsdfmt/bsd_run: bsdfmt/bsd_run.c bsdfmt/bsd_format.h
-	$(HOSTCC) -O2 -Wall -Wextra -std=gnu11 -o $@ $<
-
-# --- Store apps: canvas apps compiled to ELF64, repacked as .bsd ---
-# bsd.ld puts .data on its own page so the two segments can carry
-# different protections; -z max-page-size stops ld padding to 2 MB.
-build/store/%.o: apps/store/%.c apps/socrates.h
-	@mkdir -p build/store
-	$(CC) $(APP_CFLAGS) -c $< -o $@
-
-build/store/%.elf: build/store/%.o bsdfmt/bsd.ld
-	$(LD) -nostdlib -static -z max-page-size=0x1000 -T bsdfmt/bsd.ld $< -o $@
-
-build/store/%.bsd: build/store/%.elf $(BSD_MAKER)
-	$(BSD_MAKER) -o $@ -e $<
-
-# --- Pictures: PNG -> .sci ---
-build/pics/%.sci: apps/pics/%.png tools/mkimg.py
-	@mkdir -p build/pics
-	python3 tools/mkimg.py -o $@ $<
-
-# --- Ramdisk: tar archive of apps/ text files + compiled binaries ---
-# The store payloads ride along here too, so the storefront still has
-# something to install on an ISO-only boot with no disk attached.
-build/initrd.tar: $(wildcard apps/*.txt) build/hello $(STORE_BINS)
-	@mkdir -p build/initrd_staging/store/pkg
-	cp apps/*.txt build/initrd_staging/ 2>/dev/null || true
-	cp build/hello build/initrd_staging/
-	$(foreach a,$(STORE_APPS),cp build/store/$(a).bsd build/initrd_staging/store/pkg/$(a).bsd;)
-	tar --format=ustar -cf $@ -C build/initrd_staging .
-	rm -rf build/initrd_staging
-
-# --- Boot animation: video → raw RGB565 + header ---
-build/boot_anim.raw kernel/include/boot_animation.h: boot.mp4 tools/convert_video.py
-	@mkdir -p build kernel/include
-	python3 tools/convert_video.py boot.mp4 build/boot_anim.raw kernel/include/boot_animation.h
-
-build/boot_animation_data.o: src/boot_animation_data.S build/boot_anim.raw
-	@mkdir -p build
-	$(CC) $(CFLAGS) -c $< -o $@
+all: os.iso
 
 # --- Kernel ---
-build/kernel.o: src/kernel.c $(wildcard src/*.h) kernel/include/boot_animation.h build/res.stamp
+build/kernel.o: src/kernel.c $(wildcard src/*.h) build/res.stamp
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# The inference unit is the one place floats are allowed: a transformer
-# is float maths end to end, while the rest of the kernel stays integer
-# only so no interrupt handler can grow an FPU dependency.
-LLM_CFLAGS := $(filter-out -mno-80387 -mno-mmx -mno-sse -mno-sse2,$(CFLAGS)) \
-              -msse -msse2 -mfpmath=sse
+build/kernel: build/kernel.o linker.ld
+	$(LD) $(LDFLAGS) build/kernel.o -o $@
 
-build/llm.o: src/llm.c src/llm.h
+# --- ISO root ---
+build/res.stamp: FORCE
 	@mkdir -p build
-	$(CC) $(LLM_CFLAGS) -c $< -o $@
+	@echo '$(RES)' | cmp -s - $@ || echo '$(RES)' > $@
 
-build/kernel: build/kernel.o build/llm.o build/boot_animation_data.o linker.ld
-	$(LD) $(LDFLAGS) build/kernel.o build/llm.o build/boot_animation_data.o -o $@
-
-# --- ISO root population ---
 $(ISO)/boot/kernel: build/kernel
 	@mkdir -p $(ISO)/boot/limine $(ISO)/EFI/BOOT
 	cp $< $@
 
-$(ISO)/boot/initrd.tar: build/initrd.tar
-	@mkdir -p $(ISO)/boot
-	cp $< $@
-
-# Framebuffer mode.  `resolution` is the key Limine actually reads; the
-# framebuffer_width/height/bpp trio that used to live in limine.conf is
-# not part of the config format at all, so it was quietly ignored and the
-# mode came from whatever the display's EDID preferred.  Any size up to
-# the BUF_MAX_W x BUF_MAX_H back buffer in src/kernel.c works:
-#     make run RES=1920x1080x32
-
-# make compares timestamps, and a variable has none — without recording
-# RES somewhere on disk, changing it would leave the previous mode baked
-# into an ISO that looks up to date.
-build/res.stamp: FORCE
-	@mkdir -p build
-	@echo '$(RES) $(FB_MAX_W)x$(FB_MAX_H)' | cmp -s - $@ || \
-	  echo '$(RES) $(FB_MAX_W)x$(FB_MAX_H)' > $@
-
 $(ISO)/boot/limine/limine.conf: limine.conf build/res.stamp
-	@mkdir -p $(ISO)/boot/limine
+	@mkdir -p $(ISO)/boot/limine $(ISO)/EFI/BOOT
 	sed 's|^\( *resolution:\).*|\1 $(RES)|' limine.conf > $@
-	cp $(LIMINE)/limine-bios.sys       $(ISO)/boot/limine/
-	cp $(LIMINE)/limine-bios-cd.bin    $(ISO)/boot/limine/
-	cp $(LIMINE)/limine-uefi-cd.bin    $(ISO)/boot/limine/
-	cp $(LIMINE)/BOOTX64.EFI          $(ISO)/EFI/BOOT/
+	cp $(LIMINE)/limine-uefi-cd.bin $(ISO)/boot/limine/
+	cp $(LIMINE)/BOOTAA64.EFI       $(ISO)/EFI/BOOT/
 
-# --- Bundle raw Seedance video asset into ISO root ---
-$(ISO)/boot/boot_anim.raw: build/boot_anim.raw
-	@mkdir -p $(ISO)/boot
-	cp $< $@
-
-# --- ISO image (portable El Torito, xorriso/mkisofs compatible) ---
 iso: os.iso
 
-os.iso: build/limine-tool $(ISO)/boot/kernel $(ISO)/boot/initrd.tar $(ISO)/boot/boot_anim.raw $(ISO)/boot/limine/limine.conf
+os.iso: $(ISO)/boot/kernel $(ISO)/boot/limine/limine.conf
 	xorriso -as mkisofs \
 		-R -J \
-		-V "SOCRATES_BSD_9" \
-		-b boot/limine/limine-bios-cd.bin \
-		-no-emul-boot -boot-load-size 4 -boot-info-table \
+		-V "SOCRATES_ARM64" \
 		--efi-boot boot/limine/limine-uefi-cd.bin \
 		-efi-boot-part --efi-boot-image \
 		--protective-msdos-label \
 		-o os.iso \
-		$(ISO) 2>&1
-	build/limine-tool bios-install os.iso
+		$(ISO) 2>&1 | tail -3
 
 # --- Run ---
-# Not every QEMU is built with the same display backends: Homebrew's
-# macOS build ships Cocoa and no SDL, most Linux builds have GTK and SDL.
-# Ask this one what it has rather than hard-coding a backend, and only
-# pass sub-options the chosen backend actually accepts (grab-mod is
-# SDL-only, and QEMU rejects the whole option if it does not know it).
+# -cpu host with hvf is the entire point of this port: the x86 build runs
+# under TCG emulation on an arm64 Mac, this one runs on the actual CPU.
+# ACCEL=tcg is kept because emulation enforces weaker memory ordering than
+# the hardware does, and so catches missing barriers that hvf would hide.
+ACCEL ?= hvf
+ifeq ($(ACCEL),hvf)
+QEMU_CPU := -cpu host
+else
+QEMU_CPU := -cpu cortex-a72
+endif
+
+QEMU_COMMON := -M virt -m 2048 $(QEMU_CPU) -accel $(ACCEL) \
+	-drive if=pflash,format=raw,unit=0,readonly=on,file=$(FIRMWARE) \
+	-drive if=pflash,format=raw,unit=1,file=build/efi-vars.fd \
+	-device ramfb \
+	-cdrom os.iso
+
+# EDK2 keeps its variables in a second flash bank; it wants one the same
+# size as the code image even when empty.
 #
-# zoom-to-fit matters more than it sounds: without it, Cocoa and GTK draw
-# the guest at 1:1 in the middle of the full-screen window and surround it
-# with black, which looks exactly like a desktop that refuses to resize.
-QEMU ?= qemu-system-x86_64
+# Regenerated whenever the ISO is, deliberately. EDK2 writes a boot entry
+# naming the exact PCI path it booted from, and a stale one sends it to
+# the UEFI shell instead of the disc the moment anything about the device
+# set changes — which looks exactly like a kernel that failed to load.
+build/efi-vars.fd: os.iso
+	@mkdir -p build
+	dd if=/dev/zero of=$@ bs=1m count=64 2>/dev/null
 
-QEMU_DISPLAY := $(shell d=$$($(QEMU) -display help 2>/dev/null); \
-  if   echo "$$d" | grep -qx sdl;   then echo 'sdl,show-cursor=off,grab-mod=lshift-lctrl-lalt'; \
-  elif echo "$$d" | grep -qx gtk;   then echo 'gtk,show-cursor=off,grab-on-hover=on,zoom-to-fit=on'; \
-  elif echo "$$d" | grep -qx cocoa; then echo 'cocoa,show-cursor=off,zoom-to-fit=on'; \
-  else echo none; fi)
+run: os.iso build/efi-vars.fd
+	qemu-system-aarch64 $(QEMU_COMMON) -serial stdio
 
-# (a shell `case` cannot be used here: the ")" in its patterns would
-# close make's own $(shell ...) expansion early)
-QEMU_FSKEY := $(if $(findstring cocoa,$(QEMU_DISPLAY)),Ctrl + Cmd + F,Ctrl + Alt + F)
-
-run: os.iso disk.img
-	@echo ""
-	@echo "  [TIP] Toggle full-screen on/off at any time with: $(QEMU_FSKEY)"
-	@echo "  [TIP] The pointer is absolute — just move it, no click to grab."
-	@echo ""
-	$(QEMU) \
-		-cdrom os.iso \
-		-drive file=disk.img,format=raw,index=0,media=disk \
-		-m 2048M \
-		$(QEMU_VGA) \
-		-display $(QEMU_DISPLAY) \
-		-full-screen \
-		-boot d \
-		-netdev user,id=net0,net=10.0.2.0/24 \
-		-device e1000,netdev=net0
-
-# keep the intermediates make would otherwise delete as chained targets
-.PRECIOUS: build/store/%.o build/store/%.elf
+# Headless, for the scripted harness: serial to a log, QMP for input and
+# screenshots. Same shape as the x86 tree's tools/qemu_drive.py workflow.
+run-headless: os.iso build/efi-vars.fd
+	qemu-system-aarch64 $(QEMU_COMMON) -display none \
+		-serial file:build/serial.log \
+		-qmp tcp:127.0.0.1:4480,server,nowait
 
 clean:
-	$(MAKE) -C bsdfmt clean
-	rm -rf build os.iso \
-		$(ISO)/boot/kernel \
-		$(ISO)/boot/initrd.tar \
-		$(ISO)/boot/boot_anim.raw \
-		$(ISO)/boot/limine \
-		$(ISO)/EFI \
-		kernel/include/boot_animation.h
+	rm -rf build os.iso $(ISO)/boot $(ISO)/EFI

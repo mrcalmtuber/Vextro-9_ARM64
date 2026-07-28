@@ -1,5 +1,5 @@
-OUTPUT_FORMAT(elf64-x86-64)
-OUTPUT_ARCH(i386:x86-64)
+OUTPUT_FORMAT(elf64-littleaarch64)
+OUTPUT_ARCH(aarch64)
 
 ENTRY(kmain)
 
@@ -11,7 +11,9 @@ PHDRS {
 }
 
 SECTIONS {
-    /* Limine higher-half kernel load address */
+    /* Limine higher-half kernel load address — the same window on
+     * aarch64 as on x86-64, reached through TTBR1_EL1 rather than the
+     * top half of an x86 four-level walk. */
     . = 0xffffffff80000000;
 
     .text : ALIGN(4096) {

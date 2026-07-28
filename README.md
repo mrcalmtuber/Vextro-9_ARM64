@@ -1,5 +1,40 @@
 # Socrates BSD 9
 
+> ### ARM64 port — in progress
+>
+> This repository is the **aarch64 port** of Socrates BSD 9. The x86_64
+> original lives in its own repository and is unaffected.
+>
+> It exists because the host these run on is an Apple Silicon Mac: the
+> x86_64 build is fully emulated under QEMU's TCG, while this one runs on
+> the CPU itself through `hvf`. That is the difference between a language
+> model at roughly a minute per token and one that answers, and between a
+> desktop that repaints a few times a second under load and one that does
+> not.
+>
+> Roughly 63% of the 23,000-line tree is architecture-independent and
+> carries over untouched — the compression, filesystem, font, browser and
+> inference code all read bytes one at a time and do integer maths, so
+> there is not a single unaligned pointer cast to fix. Under 9% is
+> genuinely architecture-specific.
+>
+> **Progress**
+>
+> - [x] **M0** — repo, aarch64 toolchain, UEFI ISO, framebuffer
+> - [ ] **M1** — PL011 console, exception vectors, GICv2, generic timer
+> - [ ] **M2** — virtio-input (keyboard + absolute pointer)
+> - [ ] **M3** — PCIe ECAM, ARM64 page tables, virtio-blk, filesystems
+> - [ ] **M4** — virtio-net, TCP/IP, browser
+> - [ ] **M5** — aarch64 `.bsd` format, `svc #0` syscalls, app store
+> - [ ] **M6** — local model and offline Wikipedia, at native speed
+> - [ ] **M7** — real hardware (Raspberry Pi 4/5)
+>
+> Files ending `.ref` are the x86_64 originals, kept beside their
+> replacements while the port is under way.
+>
+> Build and run: `make && make run` (add `ACCEL=tcg` to check memory
+> ordering the hardware would otherwise hide).
+
 A bare-metal x86_64 operating system built from scratch — custom kernel, TrueType font rasterizer, window manager, TCP/IP stack, web browser, boot animation and desktop UI, all without a libc or external OS dependencies.
 
 ---
