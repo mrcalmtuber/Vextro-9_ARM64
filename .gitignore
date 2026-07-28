@@ -1,0 +1,33 @@
+# Build artifacts
+build/
+
+# Generated ISO (distributed via GitHub Releases)
+os.iso
+
+# ISO root populated at build time
+iso_root/boot/
+iso_root/EFI/
+
+# Generated header from video conversion
+kernel/include/boot_animation.h
+
+# Extracted limine source tree
+limine-12.3.2/
+
+# macOS metadata
+.DS_Store
+**/.DS_Store
+
+# Claude session data
+.claude/
+
+# Generated FAT32 system disk (user data lives here)
+disk.img
+
+# .bsd toolchain binaries and example images
+bsdfmt/bsd_maker
+bsdfmt/bsd_run
+bsdfmt/*.o
+bsdfmt/*.bin
+bsdfmt/*.elf
+bsdfmt/*.bsd
