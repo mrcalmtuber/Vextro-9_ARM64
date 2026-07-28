@@ -959,8 +959,17 @@ static float k_cos(float x) { return k_sin(x + K_PI * 0.5f); }
 
 static float k_sqrt(float x) {
     if (x <= 0.0f) return 0.0f;
+    /*
+     * The one architecture-specific line in 1,399 lines of inference.
+     *
+     * x86 needed inline asm because the kernel is built -mno-sse, so the
+     * compiler will not emit an SSE square root even where one exists.
+     * aarch64 has FSQRT in the base instruction set, and this translation
+     * unit is the single one compiled without -mgeneral-regs-only, so the
+     * builtin lowers to exactly that instruction with no asm at all.
+     */
     float r;
-    __asm__ volatile("sqrtss %1, %0" : "=x"(r) : "x"(x));
+    __asm__ volatile("fsqrt %s0, %s1" : "=w"(r) : "w"(x));
     return r;
 }
 

@@ -84,8 +84,24 @@ build/hello_bsd_data.o: src/hello_bsd_data.S build/hello.bsd
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c $< -o $@
 
-build/kernel: build/kernel.o build/vectors.o build/boot_animation_data.o build/hello_bsd_data.o linker.ld
-	$(LD) $(LDFLAGS) build/kernel.o build/vectors.o build/boot_animation_data.o build/hello_bsd_data.o -o $@
+# --- Inference, the one translation unit that may use FP/SIMD ---
+#
+# The kernel is built -mgeneral-regs-only so no code that might run in an
+# exception path can quietly acquire a floating-point dependency. llm.c is
+# nothing but float math, so it is the deliberate exception, exactly as it
+# is the one file the x86 tree builds without -mno-sse. Porting it needed
+# a single line: an SSE sqrtss became FSQRT, which aarch64 has in its base
+# instruction set.
+LLM_CFLAGS := -O2 -Wall -Wextra -ffreestanding -fno-stack-protector \
+              -fno-stack-check -fno-lto -fno-pie -Isrc -Ikernel/include \
+              -Ibsdfmt $(EXTRA)
+
+build/llm.o: src/llm.c $(wildcard src/*.h)
+	@mkdir -p build
+	$(CC) $(LLM_CFLAGS) -c $< -o $@
+
+build/kernel: build/kernel.o build/llm.o build/vectors.o build/boot_animation_data.o build/hello_bsd_data.o linker.ld
+	$(LD) $(LDFLAGS) build/kernel.o build/llm.o build/vectors.o build/boot_animation_data.o build/hello_bsd_data.o -o $@
 
 # --- ISO root ---
 build/res.stamp: FORCE

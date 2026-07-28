@@ -1378,13 +1378,10 @@ static void term_exec(char *cmdline) {
         /* bare app name works too: "browser", "files", ... */
     } else if (str_eq(cmd, "reboot")) {
         term_print_c("rebooting...\n", 1);
-        outb(0x64, 0xFE);
+        machine_reset();   /* PSCI on aarch64; see arm.h */
     } else if (str_eq(cmd, "shutdown") || str_eq(cmd, "poweroff")) {
         term_print_c("powering off...\n", 1);
-        __asm__ volatile("outw %0, %1" :: "a"((uint16_t)0x2000),
-                         "Nd"((uint16_t)0x604) : "memory");
-        __asm__ volatile("outw %0, %1" :: "a"((uint16_t)0x2000),
-                         "Nd"((uint16_t)0xB004) : "memory");
+        machine_poweroff();   /* PSCI on aarch64; see arm.h */
     } else {
         term_print_c("unknown command: ", 2);
         term_print_c(cmd, 2);

@@ -116,6 +116,15 @@ def type_text(s):
 print(f"booting ({ACCEL}); login expected in {BOOT_WAIT:.0f}s", flush=True)
 time.sleep(BOOT_WAIT)
 
+# Enter drops the login screen and starts the desktop.
+print("pressing Enter to enter the desktop", flush=True)
+send([{"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": "ret"}}}])
+time.sleep(0.1)
+send([{"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": "ret"}}}])
+time.sleep(25)
+qmp("screendump", {"filename": f"{ROOT}/build/desktop.ppm"})
+print("captured build/desktop.ppm", flush=True)
+
 print("moving pointer to (0.25, 0.30)", flush=True)
 print(" ", move_to(0.25, 0.30), flush=True)
 time.sleep(3)

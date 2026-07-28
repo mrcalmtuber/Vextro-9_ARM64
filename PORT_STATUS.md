@@ -11,9 +11,9 @@ untouched and unaffected.
 | M1 | Console, exceptions, timer, render loop | done |
 | M2 | Input — keyboard and pointer | done |
 | M3 | Storage — virtio-blk, exFAT | done (PCIe ECAM not needed, see below) |
-| M4 | Network — virtio-net, TCP/IP, HTTP | done (browser UI not wired) |
-| M5 | Userland — aarch64 `.bsd`, `svc #0` | done (Agora UI not wired) |
-| M6 | Model and Wikipedia | not started |
+| M4 | Network — virtio-net, TCP/IP, HTTP, browser | done |
+| M5 | Userland — aarch64 `.bsd`, `svc #0` | done |
+| M6 | Model and Wikipedia | llm.c builds and links; not yet exercised |
 | M7 | Real hardware — Raspberry Pi | not started |
 
 Boot animation plays, the login screen renders and animates at a locked
@@ -22,6 +22,9 @@ cursor absolutely, the 8 GB exFAT volume mounts and lists, and the network
 stack pings its gateway and fetches a real page over HTTP. An aarch64
 `.bsd` application loads, runs, and calls back into the kernel through
 `svc #0` — and the x86_64 build of the same program is refused.
+
+The desktop is wired up: logging in brings up the window manager, dock,
+menu bar and clock, and the browser fetches and renders a real page.
 
 Every device — keyboard, tablet, disk, NIC — is virtio over MMIO, sharing
 one virtqueue implementation. That is why three milestones landed without
@@ -70,6 +73,32 @@ tcg at a steady 60 fps.
 Not yet tried: attaching a debugger to qemu itself to read the guest PC at
 the abort (lldb cannot drive an hvf guest without the right entitlements),
 or a newer qemu.
+
+## Porting the desktop
+
+desktop.h and its four dependents (term.h, browser.h, apps.h, store.h)
+compiled unchanged except for three things that are not really UI at all:
+
+  - `outb(0x64, 0xFE)` to reboot and two ACPI port pokes to power off
+    became `machine_reset()` and `machine_poweroff()`, which are PSCI
+    calls — an interface the architecture defines, rather than a keyboard
+    controller and a chipset being used as power buttons.
+
+  - `igpu.h` became an inert declaration. There is no Intel blitter on
+    `virt`, but term.h's `gpu` diagnostics read the struct, and forking a
+    1,400-line file to avoid one struct would cost more than it saves.
+    The commands now report "no integrated GPU on this machine", which is
+    true. The CPU renderer in gfx.h is what draws on both trees anyway.
+
+  - A handful of x86 driver facts term.h reports — PS/2 packet length,
+    the e1000 link-status register — became the virtio equivalents behind
+    the same names.
+
+Build with `EXTRA=-DAUTO_BROWSER` to have the desktop open the browser on
+a fixed URL at login. Clicking a dock icon over QMP means knowing where
+the dock put it, which depends on the panel size and item count, so a
+coordinate-clicking test really tests the dock layout and fails for
+reasons unrelated to the browser.
 
 ## Things that cost a lot to learn
 

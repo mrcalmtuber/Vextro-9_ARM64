@@ -1301,12 +1301,9 @@ static void menu_action(int action) {
         }
         wm_open(action);
     } else if (action == 100) {
-        outb(0x64, 0xFE);
+        machine_reset();   /* PSCI on aarch64; see arm.h */
     } else if (action == 101) {
-        __asm__ volatile("outw %0, %1" :: "a"((uint16_t)0x2000),
-                         "Nd"((uint16_t)0x604) : "memory");
-        __asm__ volatile("outw %0, %1" :: "a"((uint16_t)0x2000),
-                         "Nd"((uint16_t)0xB004) : "memory");
+        machine_poweroff();   /* PSCI on aarch64; see arm.h */
     }
 }
 

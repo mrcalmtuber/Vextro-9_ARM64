@@ -79,6 +79,19 @@ volatile int     mouse_absolute = 0;
 static int32_t vti_screen_w = 1, vti_screen_h = 1;
 
 /*
+ * Pointer facts term.h's `mouse` diagnostic reports.
+ *
+ * On x86 these describe a negotiated PS/2 stream: how many bytes each
+ * packet turned out to be, and the tablet's coordinate ceiling. Here the
+ * event record is a fixed 8-byte struct and the ceiling is the screen,
+ * because the device reports absolute positions that this driver has
+ * already scaled. The names stay so the diagnostic does.
+ */
+static int mouse_pkt_len = (int)sizeof(struct virtio_input_event);
+#define mouse_max_x vti_screen_w
+#define mouse_max_y vti_screen_h
+
+/*
  * Two devices, each with its own rings.
  *
  * Statically allocated because there is no allocator, and 16-byte aligned

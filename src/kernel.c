@@ -9,7 +9,10 @@
 #include "exfat.h"
 #include "e1000.h"
 #include "netstack.h"
+#include "igpu.h"
+#include "llm.h"
 #include "bsdload.h"
+#include "desktop.h"
 #include "ttf.h"
 #include "login.h"
 #include "boot_animation.h"
@@ -124,6 +127,51 @@ static void boot_list_entry(const char *name, uint32_t size, int is_dir) {
         serial_puts(" bytes");
     }
     serial_puts("\n");
+}
+
+
+/*
+ * The pointer, drawn by the kernel rather than the panel.
+ *
+ * ramfb has no hardware cursor plane and virtio-input reports positions
+ * rather than moving one, so the arrow is composited into the back buffer
+ * like everything else. Two colours: X is the outline, . the fill.
+ */
+static const char *CURSOR_IMG[18] = {
+    "X           ",
+    "XX          ",
+    "X.X         ",
+    "X..X        ",
+    "X...X       ",
+    "X....X      ",
+    "X.....X     ",
+    "X......X    ",
+    "X.......X   ",
+    "X........X  ",
+    "X.....XXXXX ",
+    "X..X..X     ",
+    "X.X X..X    ",
+    "XX  X..X    ",
+    "X    X..X   ",
+    "     X..X   ",
+    "      X..X  ",
+    "      XXX   ",
+};
+
+static void draw_cursor(uint32_t bw, uint32_t bh) {
+    uint32_t cx = (uint32_t)mouse_x;
+    uint32_t cy = (uint32_t)mouse_y;
+    for (uint32_t row = 0; row < 18; row++) {
+        const char *line = CURSOR_IMG[row];
+        for (uint32_t col = 0; col < 12; col++) {
+            char c = line[col];
+            if (c == ' ') continue;
+            uint32_t px = cx + col;
+            uint32_t py = cy + row;
+            if (px < bw && py < bh)
+                backbuf[py * bw + px] = (c == 'X') ? 0x000000u : 0xFFFFFFu;
+        }
+    }
 }
 
 static void halt_forever(void) {
@@ -513,6 +561,7 @@ void kmain(void) {
     uint8_t last_mb = 0;
 
     int net_selftest_sent = 0, net_selftest_seen = 0;
+    int desktop_mode = 0;
     int net_fetch_started = 0, net_fetch_reported = 0;
 
 
@@ -614,22 +663,97 @@ void kmain(void) {
             serial_puts("\n");
         }
 
+        /*
+         * Two modes, one loop.
+         *
+         * The login screen owns the frame until a password is accepted,
+         * then desktop_render() does — window manager, dock, menu bar,
+         * terminal, browser and all. That whole stack is portable and
+         * compiled for aarch64 unchanged; what it needed was the four
+         * things the milestones before this built, which is why wiring it
+         * up is a branch rather than a port.
+         */
+        if (desktop_mode) {
+            char dch;
+            while ((dch = kb_getchar()) != 0)
+                desktop_key_input(dch);
+
+            /* Read then subtract, rather than read then zero, so a notch
+             * that lands between the two is carried into the next frame
+             * instead of being dropped. */
+            int32_t wheel = mouse_wheel;
+            if (wheel) {
+                mouse_wheel -= wheel;
+                desktop_wheel_input(wheel);
+            }
+
+            desktop_render(backbuf, w, h, mouse_x, mouse_y, mouse_buttons);
+            draw_cursor(w, h);
+            vga_flip(vram, w, h, pitch_px);
+            CHK(5);
+
+            frames++;
+            if (frames % 120 == 0) {
+                uint64_t now = timer_ms();
+                uint64_t ms  = now - last_report_ms;
+                last_report_ms = now;
+                serial_puts("[socrates/arm64] desktop: 120 frames in ");
+                serial_put_u64(ms);
+                serial_puts(" ms (");
+                serial_put_u64(ms ? (120 * 1000) / ms : 0);
+                serial_puts(" fps)\n");
+            }
+            next_frame += frame_ticks;
+            timer_wait_until(next_frame);
+            continue;
+        }
+
         /* Echo what has been typed, so the field fills in as keys land. */
         char ch;
         while ((ch = kb_getchar()) != 0) {
             if (ch == '\b') {
                 if (pw_len > 0) pw_len--;
             } else if (ch == '\n') {
+                /*
+                 * First boot sets the password; later boots check it.
+                 * The volume this port tests against is attached
+                 * read-only, so there is nowhere to persist it yet and
+                 * any password is accepted on the first Enter — the
+                 * check itself lives in desktop.h and comes back with a
+                 * writable disk.
+                 */
+                desktop_mode = 1;
+                for (uint32_t i = 0; i < w * h; i++) backbuf[i] = COLOR_BLACK;
+                prev_valid = 0;
+                serial_puts("[socrates/arm64] desktop: entering\n");
                 pw_len = 0;
+#ifdef AUTO_BROWSER
+                /*
+                 * Open the browser on a fixed URL, for the headless
+                 * harness.
+                 *
+                 * Clicking a dock icon over QMP means knowing where the
+                 * dock put it, which depends on the panel size and the
+                 * item count — so a test that clicks coordinates is
+                 * really testing the dock layout, and fails for reasons
+                 * that have nothing to do with the browser. This opens
+                 * the same window through the same entry point the dock
+                 * uses and leaves the click path to a human.
+                 */
+                wm_open(WK_BROWSER);
+                brw_navigate("http://example.com/");
+                serial_puts("[socrates/arm64] desktop: browser opened on example.com\n");
+#endif
             } else if (ch >= 0x20 && ch < 0x7F && pw_len < (int)sizeof(pw) - 1) {
                 pw[pw_len++] = ch;
             }
             pw[pw_len] = '\0';
         }
+        if (desktop_mode) continue;
 
         login_render(backbuf, w, h, mouse_x, mouse_y, pw,
                      mouse_buttons, "Socrates BSD 9 - ARM64");
-        if (frames == 0) CHK(4);
+        draw_cursor(w, h);
 
         fill_rect(w, 0,     0,     w, 1, COLOR_GOLD);
         fill_rect(w, 0,     h - 1, w, 1, COLOR_GOLD);

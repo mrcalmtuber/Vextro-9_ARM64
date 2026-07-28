@@ -408,6 +408,52 @@ static void mmio_map_init(void) {
     ISB();
 }
 
+/*
+ * Physical address to something the kernel can dereference.
+ *
+ * The low 4 GB is identity-mapped by mmio_map_init(), which covers all of
+ * this machine's RAM and every device region, so the mapping is the
+ * identity. It exists as a function because the x86 tree has one and the
+ * portable code calls it; when this kernel maps memory somewhere other
+ * than where it lives, only this changes.
+ */
+static inline void *phys_to_virt(uint64_t phys) {
+    return (void *)(uintptr_t)phys;
+}
+
+/*
+ * Reset the machine.
+ *
+ * The x86 tree pulses the PS/2 controller's reset line — `outb(0x64,
+ * 0xFE)` — which is a keyboard controller being used as a power button
+ * for historical reasons. aarch64 has an actual interface for this: PSCI,
+ * a firmware call defined by the architecture. SYSTEM_RESET is function
+ * 0x84000009 and takes no arguments.
+ *
+ * HVC rather than SMC because qemu's virt machine puts its PSCI
+ * implementation at the hypervisor level when there is no secure
+ * firmware, which is how this kernel is booted.
+ */
+static void machine_reset(void) {
+    register uint64_t x0 __asm__("x0") = 0x84000009ULL;   /* SYSTEM_RESET */
+    __asm__ volatile("hvc #0" : "+r"(x0) :: "memory");
+    for (;;) __asm__ volatile("wfi");     /* not reached */
+}
+
+/*
+ * Power off.
+ *
+ * The x86 tree writes 0x2000 to the ACPI PM1a control block at 0x604, and
+ * again at 0xB004 for older qemu — two magic port pokes chosen by trial.
+ * PSCI has a function for it: SYSTEM_OFF, 0x84000008, no arguments, one
+ * call, defined by the architecture rather than by a chipset.
+ */
+static void machine_poweroff(void) {
+    register uint64_t x0 __asm__("x0") = 0x84000008ULL;   /* SYSTEM_OFF */
+    __asm__ volatile("hvc #0" : "+r"(x0) :: "memory");
+    for (;;) __asm__ volatile("wfi");     /* not reached */
+}
+
 /* ---- exception vectors ---- */
 
 extern char exception_vectors[];        /* defined in vectors.S */

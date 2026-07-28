@@ -90,6 +90,24 @@ static void vnet_post_rx(uint32_t slot) {
     virtq_offer(vnet_base, 0, &vnet_rx, (uint16_t)slot, p, VNET_BUF, 1);
 }
 
+/*
+ * Link status, in the register term.h expects.
+ *
+ * The diagnostic reads E1000_STATUS and tests the link-up bit. virtio has
+ * no such register — a virtio-net device is either present and usable or
+ * not attached at all — so this reports the equivalent truth rather than
+ * inventing a register file. One shim keeps the terminal's `net` command
+ * identical across both trees.
+ */
+#define E1000_STATUS     0x0008
+#define E1000_STATUS_LU  (1u << 1)
+
+static uint32_t e1000_read(uint32_t reg) {
+    if (reg == E1000_STATUS)
+        return e1000_found ? E1000_STATUS_LU : 0;
+    return 0;
+}
+
 static void e1000_read_mac(void) {
     if (!e1000_found) return;
     volatile uint8_t *cfg = (volatile uint8_t *)mmio32(vnet_base + VIO_CONFIG);
