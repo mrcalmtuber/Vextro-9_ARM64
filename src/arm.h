@@ -43,11 +43,48 @@
 static inline void irq_disable(void) { __asm__ volatile("msr daifset, #2" ::: "memory"); }
 static inline void irq_enable(void)  { __asm__ volatile("msr daifclr, #2" ::: "memory"); }
 
+/* Debug, SError, IRQ and FIQ all at once. Used when taking the machine
+ * over from firmware, where the interesting question is not which of the
+ * four is armed but whether any of them can arrive before this kernel is
+ * ready — and the answer should be no. */
+static inline void daif_mask_all(void) { __asm__ volatile("msr daifset, #0xf" ::: "memory"); }
+
+/* ---- reaching device registers at all ----
+ *
+ * The kernel never runs with the MMU off: Limine enables it and hands over
+ * with its own tables installed. Those tables map the kernel, usable RAM
+ * and the framebuffer — and nothing else. Device registers are not in the
+ * higher-half direct map (it covers memory, and MMIO is not memory), and
+ * whether they happen to be identity-mapped low depends on how Limine sized
+ * its tables, which in turn depends on the physical address range the CPU
+ * reports. On `-cpu host` they were reachable; on `-cpu cortex-a72` they
+ * were not, and the same binary printed six lines under one and nothing at
+ * all under the other.
+ *
+ * The failure is worth describing because it does not look like what it is.
+ * Touching an unmapped device register is a data abort, and it happens on
+ * the first UART write — before VBAR_EL1 has been set, because setting it
+ * requires getting far enough to call exceptions_init(). So the CPU vectors
+ * to address zero, executes whatever the firmware left there, and ends up
+ * in a fault loop with a garbage stack pointer. From the outside: a machine
+ * that is powered on, consuming CPU, and silent. Days went into that.
+ *
+ * So the kernel maps its own device memory rather than depending on
+ * anything inherited. It is the earliest possible thing after entry, it
+ * has to come before the first character of output, and it means every
+ * address below is one this kernel put in a page table itself.
+ */
+
+/* Physical addresses are identity-mapped by mmio_map_init(). */
+static inline volatile uint32_t *mmio32(uint64_t phys) {
+    return (volatile uint32_t *)(uintptr_t)phys;
+}
+
 /* ---- PL011 UART ---- */
 
 #define PL011_BASE    0x09000000UL
-#define PL011_DR      (*(volatile uint32_t *)(PL011_BASE + 0x00))
-#define PL011_FR      (*(volatile uint32_t *)(PL011_BASE + 0x18))
+#define PL011_DR      (*mmio32(PL011_BASE + 0x00))
+#define PL011_FR      (*mmio32(PL011_BASE + 0x18))
 #define PL011_FR_TXFF (1u << 5)
 
 static void serial_putc(char c) {
@@ -94,7 +131,7 @@ static void serial_put_hex32(uint32_t v) {
  * no update-in-progress race to worry about, and no BCD conversion.
  */
 #define PL031_BASE 0x09010000UL
-#define PL031_DR   (*(volatile uint32_t *)(PL031_BASE + 0x00))
+#define PL031_DR   (*mmio32(PL031_BASE + 0x00))
 
 static uint32_t rtc_epoch(void) { return PL031_DR; }
 
@@ -132,14 +169,18 @@ static uint64_t timer_ms(void) {
  */
 static void timer_wait_until(uint64_t until) {
     /*
-     * Bounded by a count small enough that overrunning it costs a frame,
-     * not a minute. `yield` is deliberately absent: it is only a hint on
-     * real silicon, but under a hypervisor it can trap, which turns a
-     * spin that was meant to be cheap into one that leaves the machine
-     * apparently dead. Reading the counter is enough of a pause.
+     * The bound is a second of elapsed *time*, not a spin count, so it
+     * means the same thing on a 62.5 MHz virtual counter and on whatever
+     * real hardware reports. A target that is nonsense — computed from a
+     * bad frequency, or already far in the past after a long frame —
+     * costs one late frame rather than a machine that never comes back.
      */
-    for (uint32_t i = 0; i < 4000000u; i++) {
-        if (timer_count() >= until) return;
+    uint64_t start = timer_count();
+    uint64_t limit = timer_hz();
+    for (;;) {
+        uint64_t now = timer_count();
+        if (now >= until) return;
+        if (now - start > limit) return;
     }
 }
 
@@ -157,20 +198,187 @@ static void fpu_init(void) {
     ISB();
 }
 
+/* ---- GICv2, as inherited ---- */
+#define GICD_BASE  0x08000000UL
+#define GICC_BASE  0x08010000UL
+#define GICD_CTLR  (*mmio32(GICD_BASE + 0x000))
+#define GICC_CTLR  (*mmio32(GICC_BASE + 0x000))
+
 /*
  * Take the machine over from the firmware.
  *
- * EDK2 runs its own periodic tick off the EL1 physical timer and leaves
- * it armed when it hands control on. Nothing turns it off in between, so
- * the first comparator match after we arrive raises PPI 30 into an
- * interrupt controller this kernel has not configured — and the CPU
- * takes an exception out of the middle of whatever it was doing. Masking
- * interrupts and disarming the timer is the first thing a kernel should
- * do with inherited hardware, and costs two register writes.
+ * EDK2 runs a periodic tick and hands control on with everything still
+ * armed: a timer counting toward a comparator, and a GIC configured to
+ * deliver the result. Nothing switches that off in between. So the first
+ * comparator match after arrival raises an interrupt into a controller
+ * this kernel has not configured, out of the middle of whatever it was
+ * doing.
+ *
+ * Both timers, not just one. The physical timer is the obvious candidate
+ * and the wrong one: firmware on this machine ticks off the *virtual*
+ * timer, so disarming only cntp_ctl_el0 leaves the actual source running
+ * and looks like it should have worked. Masking DAIF.I is not a
+ * substitute either — a masked interrupt is still asserted, still pending
+ * at the controller, and still a wakeup.
+ *
+ * The GIC goes quiet too, at both ends: the distributor stops forwarding
+ * and the CPU interface stops signalling. When this kernel wants
+ * interrupts it will program the GIC deliberately, and starting from a
+ * controller in a known state is worth more than inheriting one.
  */
 static void timer_takeover(void) {
-    irq_disable();
-    SYSREG_WRITE(cntp_ctl_el0, 0);      /* disable, unmask; no comparator */
+    daif_mask_all();
+
+    SYSREG_WRITE(cntp_ctl_el0, 0);      /* physical timer: disarmed */
+    SYSREG_WRITE(cntv_ctl_el0, 0);      /* virtual timer: the one in use */
+    ISB();
+
+    GICC_CTLR = 0;                      /* CPU interface: signal nothing */
+    GICD_CTLR = 0;                      /* distributor: forward nothing */
+    DSB();
+    ISB();
+}
+
+/*
+ * Report the translation regime the firmware handed over.
+ *
+ * Worth its twenty lines: on x86 the kernel builds its own page tables and
+ * knows what they say, but here Limine enables the MMU before the kernel
+ * runs and every address it uses afterwards — stack, framebuffer, its own
+ * code — depends on tables it never saw. When something faults, the first
+ * question is always whether the mapping was ever there, and guessing at
+ * that from a fault address alone is how an afternoon disappears.
+ */
+static void mmu_report(void) {
+    uint64_t sp;
+    __asm__ volatile("mov %0, sp" : "=r"(sp));
+    serial_puts("[socrates/arm64] SP     "); serial_put_hex64(sp);
+    serial_puts("\n[socrates/arm64] TTBR0  "); serial_put_hex64(SYSREG_READ(ttbr0_el1));
+    serial_puts("\n[socrates/arm64] TTBR1  "); serial_put_hex64(SYSREG_READ(ttbr1_el1));
+    serial_puts("\n[socrates/arm64] TCR    "); serial_put_hex64(SYSREG_READ(tcr_el1));
+    serial_puts("\n[socrates/arm64] SCTLR  "); serial_put_hex64(SYSREG_READ(sctlr_el1));
+    serial_puts("\n[socrates/arm64] MAIR   "); serial_put_hex64(SYSREG_READ(mair_el1));
+    serial_puts("\n");
+}
+
+/*
+ * Ask the hardware whether an address is mapped, without touching it.
+ *
+ * AT S1E1W runs one address through the stage-1 write permission check and
+ * leaves the answer in PAR_EL1: bit 0 set means the walk failed. This is
+ * the only way to test a mapping that does not involve faulting on it,
+ * which matters when the address under suspicion is the stack the fault
+ * handler would need in order to tell you about it.
+ */
+static uint64_t mmu_probe_write(uint64_t va) {
+    __asm__ volatile("at s1e1w, %0" :: "r"(va) : "memory");
+    ISB();
+    return SYSREG_READ(par_el1);
+}
+
+/* ---- device memory mapping ----
+ *
+ * A translation regime of our own for the bottom half of the address space.
+ * TTBR1 — the kernel, the stack, the direct map, the framebuffer — stays
+ * exactly as Limine left it, so the code performing this switch keeps
+ * running throughout. Only TTBR0 is replaced, and the kernel uses no low
+ * addresses except the device registers being mapped here.
+ *
+ * One 1 GB block descriptor covers everything the `virt` machine puts below
+ * RAM: the GIC at 0x08000000, the UART at 0x09000000, the RTC at 0x09010000,
+ * fw_cfg, and the virtio-mmio transports. PCIe windows arrive with storage.
+ */
+#define PTE_VALID   (1ULL << 0)
+#define PTE_TABLE   (3ULL << 0)         /* table descriptor: valid + table */
+#define PTE_BLOCK   (1ULL << 0)         /* block descriptor at L1/L2 */
+#define PTE_ATTR(i) ((uint64_t)(i) << 2)
+#define PTE_AP_RW   (0ULL << 6)         /* EL1 read/write, EL0 none */
+#define PTE_AF      (1ULL << 10)        /* mandatory: without it, every
+                                         * access faults on first use */
+#define PTE_PXN     (1ULL << 53)
+#define PTE_UXN     (1ULL << 54)
+
+/*
+ * MAIR_EL1 as Limine leaves it is 0x...FFFF: attribute 0 and 1 are Normal
+ * write-back, and 2 through 7 are zero, which encodes Device-nGnRnE. Index
+ * 2 is therefore device memory without having to reprogram MAIR and
+ * without disturbing the attributes the existing mappings already use.
+ */
+#define MAIR_DEVICE_IDX 2
+
+static uint64_t dev_l0[512] __attribute__((aligned(4096)));
+static uint64_t dev_l1[512] __attribute__((aligned(4096)));
+static uint64_t dev_l2[512] __attribute__((aligned(4096)));
+
+/*
+ * Physical address of a virtual one, asked of the hardware.
+ *
+ * The alternative is Limine's kernel-address response and some arithmetic,
+ * but the MMU already knows the answer and AT S1E1R is how you ask it: it
+ * runs the address through the current stage-1 tables and leaves the result
+ * in PAR_EL1. Bit 0 set means the walk failed.
+ */
+static uint64_t virt_to_phys(const void *p) {
+    uint64_t va = (uint64_t)(uintptr_t)p;
+    __asm__ volatile("at s1e1r, %0" :: "r"(va) : "memory");
+    ISB();
+    uint64_t par = SYSREG_READ(par_el1);
+    if (par & 1) return 0;              /* untranslatable */
+    return (par & 0x0000FFFFFFFFF000ULL) | (va & 0xFFF);
+}
+
+static void mmio_map_init(void) {
+    for (int i = 0; i < 512; i++) { dev_l0[i] = 0; dev_l1[i] = 0; dev_l2[i] = 0; }
+
+    /*
+     * Only the 2 MB blocks that hold real devices, rather than the whole
+     * first gigabyte.
+     *
+     * Mapping all of 0..1 GB is one descriptor and very tempting, but most
+     * of that range is unbacked on this machine, and a mapping is a promise
+     * that an access will land somewhere. Under emulation a stray read of
+     * an unbacked address is logged and returns zero; under a hypervisor it
+     * is a stage-2 fault on an instruction the backend may not be able to
+     * decode, and qemu's hvf backend responds by aborting the whole
+     * process. That failure names neither the address nor the instruction,
+     * and it takes the serial log's tail with it.
+     *
+     * Mapping only what exists keeps that from being possible: a stray low
+     * access now takes an ordinary stage-1 fault, and the handler prints
+     * ESR and FAR and says exactly where it came from.
+     *
+     *   0x08000000  GICv2 distributor and CPU interface
+     *   0x09000000  PL011 UART, PL031 RTC, fw_cfg, PL061 GPIO
+     *   0x0A000000  virtio-mmio transports
+     */
+    for (uint64_t blk = 0x08000000ULL; blk < 0x0C000000ULL; blk += 0x200000ULL) {
+        dev_l2[blk >> 21] = blk | PTE_BLOCK | PTE_ATTR(MAIR_DEVICE_IDX) |
+                            PTE_AP_RW | PTE_AF | PTE_PXN | PTE_UXN;
+    }
+
+    dev_l1[0] = virt_to_phys(dev_l2) | PTE_TABLE;
+
+    /*
+     * 1 GB..4 GB identity as Normal memory, which is where the `virt`
+     * machine puts RAM. Limine mapped this too, and replacing TTBR0
+     * without it would unmap anything the bootloader reported by physical
+     * address — the framebuffer among them — turning a device-mapping fix
+     * into a framebuffer bug. Inner-shareable and cacheable so these
+     * addresses behave identically to the same memory seen through the
+     * higher-half map.
+     */
+    for (uint64_t g = 1; g < 4; g++) {
+        dev_l1[g] = (g << 30) | PTE_BLOCK | PTE_ATTR(0) | PTE_AP_RW |
+                    (3ULL << 8) | PTE_AF | PTE_PXN | PTE_UXN;
+    }
+
+    dev_l0[0] = virt_to_phys(dev_l1) | PTE_TABLE;
+
+    SYSREG_WRITE(ttbr0_el1, virt_to_phys(dev_l0));
+    DSB();
+    ISB();
+    __asm__ volatile("tlbi vmalle1" ::: "memory");
+    DSB();
     ISB();
 }
 

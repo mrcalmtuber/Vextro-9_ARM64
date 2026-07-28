@@ -16,7 +16,7 @@ LD   := aarch64-elf-ld
 # translation unit is the single exception and is built without it.
 CFLAGS := -O2 -Wall -Wextra -ffreestanding -fno-stack-protector \
           -fno-stack-check -fno-lto -fno-pie -mgeneral-regs-only \
-          -Isrc -Ikernel/include -Ibsdfmt
+          -Isrc -Ikernel/include -Ibsdfmt $(EXTRA)
 
 # Linked as a plain ET_EXEC at a fixed higher-half address, not a PIE.
 #
@@ -94,11 +94,26 @@ os.iso: $(ISO)/boot/kernel $(ISO)/boot/limine/limine.conf
 		$(ISO) 2>&1 | tail -3
 
 # --- Run ---
-# -cpu host with hvf is the entire point of this port: the x86 build runs
-# under TCG emulation on an arm64 Mac, this one runs on the actual CPU.
-# ACCEL=tcg is kept because emulation enforces weaker memory ordering than
-# the hardware does, and so catches missing barriers that hvf would hide.
-ACCEL ?= hvf
+# Defaults to tcg, which is not where this port wants to end up.
+#
+# Running on the actual CPU under hvf is the whole reason for an ARM64
+# build, and it is where the model and the desktop become usable. But
+# qemu 11.0.3's hvf backend aborts this guest — `Assertion failed: (isv)`,
+# an MMIO exit whose instruction syndrome it declines to decode — and the
+# abort is not conditional on anything this kernel does. It reproduces
+# with the render loop replaced by an empty counted spin, with the
+# framebuffer never touched, with no display device attached at all, and
+# under gic-version=2, gic-version=3 and highmem=off alike. A guest parked
+# in wfi never triggers it; a guest executing instructions does, after
+# about half a second. The same binary runs indefinitely under tcg at a
+# steady 60 fps.
+#
+# So the default is the one that works, and ACCEL=hvf is one word away for
+# anyone retesting against a newer qemu. tcg has independent value anyway:
+# emulation enforces weaker memory ordering than Apple silicon does, so it
+# catches missing barriers that hvf would hide — which matters as soon as
+# virtio descriptors arrive.
+ACCEL ?= tcg
 ifeq ($(ACCEL),hvf)
 QEMU_CPU := -cpu host
 else

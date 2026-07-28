@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+"""
+Boot the ARM64 build under QEMU and watch it properly.
+
+Why this exists rather than `make run`:
+
+  - Serial goes over a socket, not `-serial file:`. QEMU buffers a file
+    chardev, and when hvf aborts the process dies without flushing, so the
+    last few lines before a crash — the only ones that matter — are lost.
+    Reading a socket means every byte the kernel emitted has already been
+    received by the time the crash is noticed. Two wrong diagnoses on this
+    port came from trusting a truncated log.
+
+  - QEMU's own stderr is captured and printed. `Assertion failed: (isv)`
+    is an hvf message, not a kernel one, and it never reaches the serial
+    line at all.
+
+  - If the kernel goes quiet, the CPU is asked where it is. `info
+    registers` over QMP works on a live guest and answers in one shot what
+    is otherwise inferred from print statements: PC, ELR_EL1, ESR_EL1 and
+    FAR_EL1 together say what faulted, where, and on which address.
+
+Usage: tools/arm_run.py [seconds] [hvf|tcg]
+"""
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FIRMWARE = "/opt/homebrew/share/qemu/edk2-aarch64-code.fd"
+SER_PORT, QMP_PORT = 4481, 4480
+
+RUN_FOR = float(sys.argv[1]) if len(sys.argv) > 1 else 25.0
+ACCEL = sys.argv[2] if len(sys.argv) > 2 else "hvf"
+
+# tcg cannot use -cpu host, and needs a core with the features the kernel
+# expects. Emulation also enforces weaker memory ordering than Apple
+# silicon does, so a tcg run catches missing barriers hvf would hide.
+cpu = ["-cpu", "host"] if ACCEL == "hvf" else ["-cpu", "cortex-a72"]
+
+cmd = [
+    "qemu-system-aarch64", "-M", "virt", "-m", "2048", *cpu,
+    "-accel", ACCEL,
+    "-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={FIRMWARE}",
+    "-drive", f"if=pflash,format=raw,unit=1,file={ROOT}/build/efi-vars.fd",
+    "-device", "ramfb",
+    "-cdrom", f"{ROOT}/os.iso",
+    "-display", "none",
+    "-serial", f"tcp:127.0.0.1:{SER_PORT},server,nowait",
+    "-qmp", f"tcp:127.0.0.1:{QMP_PORT},server,nowait",
+]
+
+proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+
+def connect(port, tries=50):
+    for _ in range(tries):
+        try:
+            s = socket.create_connection(("127.0.0.1", port), timeout=2)
+            s.settimeout(0.2)
+            return s
+        except OSError:
+            if proc.poll() is not None:
+                return None
+            time.sleep(0.2)
+    return None
+
+
+ser = connect(SER_PORT)
+qmp = connect(QMP_PORT)
+if ser is None:
+    print("qemu died before serial came up:", proc.stdout.read().decode(errors="replace"))
+    sys.exit(1)
+
+qf = None
+if qmp:
+    qf = qmp.makefile("rw", encoding="utf-8", newline="\n")
+    qf.readline()
+    qf.write(json.dumps({"execute": "qmp_capabilities"}) + "\n")
+    qf.flush()
+    qf.readline()
+
+
+def hmp(c):
+    qf.write(json.dumps({"execute": "human-monitor-command",
+                         "arguments": {"command-line": c}}) + "\n")
+    qf.flush()
+    while True:
+        r = json.loads(qf.readline())
+        if "return" in r:
+            return r["return"]
+
+
+log = open(os.path.join(ROOT, "build/serial.log"), "wb")
+start = time.time()
+last_rx = start
+pending = b""
+went_quiet = False
+
+while time.time() - start < RUN_FOR:
+    if proc.poll() is not None:
+        break
+    try:
+        data = ser.recv(65536)
+        if data:
+            log.write(data)
+            log.flush()
+            pending += data
+            while b"\n" in pending:
+                line, pending = pending.split(b"\n", 1)
+                text = line.decode(errors="replace").rstrip("\r")
+                if "socrates" in text or "arm64" in text:
+                    print(text, flush=True)
+            last_rx = time.time()
+            went_quiet = False
+    except socket.timeout:
+        pass
+    except OSError:
+        break
+
+    # Quiet for three seconds with the guest still up: ask the CPU where it is.
+    if qf and not went_quiet and time.time() - last_rx > 3.0 and time.time() - start > 8.0:
+        went_quiet = True
+        try:
+            regs = hmp("info registers")
+        except Exception:
+            continue
+        print("\n--- guest went quiet; CPU state ---", flush=True)
+        for line in regs.splitlines():
+            if line.startswith(" PC=") or line.startswith("PC=") or "PSTATE" in line:
+                print(line.strip(), flush=True)
+        with open(os.path.join(ROOT, "build/regs.txt"), "w") as fh:
+            fh.write(regs)
+        print("--- full dump in build/regs.txt ---\n", flush=True)
+
+rc = proc.poll()
+if rc is None:
+    if qf:
+        try:
+            hmp("quit")
+        except Exception:
+            pass
+    time.sleep(0.3)
+    proc.kill()
+
+out = proc.stdout.read().decode(errors="replace").strip()
+if out:
+    print("\n--- qemu said ---")
+    print(out)
+print(f"\n--- qemu exit: {proc.poll()} after {time.time()-start:.1f}s ---")

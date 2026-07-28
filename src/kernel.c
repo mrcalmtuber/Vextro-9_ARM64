@@ -117,6 +117,31 @@ static void halt_forever(void) {
 }
 
 /*
+ * Stop the kernel at a numbered point, chosen at build time.
+ *
+ * Bisecting this port by print statement does not work, because the two
+ * failures being chased both destroy the evidence: qemu's hvf backend
+ * aborts the process on an MMIO access it cannot decode, and a dying qemu
+ * never flushes the serial chardev, so the last several lines the kernel
+ * wrote are simply gone. Twice that truncated tail was mistaken for the
+ * place execution stopped, and both times the real fault was further on.
+ *
+ * Halting is immune to that. If the machine is still running after a
+ * checkpoint, execution reached it — no output required, and nothing to
+ * lose in a buffer. Build with -DHALT_AT=n to stop at checkpoint n.
+ */
+#ifndef HALT_AT
+#define HALT_AT 0
+#endif
+#define CHK(n)                                                        \
+    do {                                                              \
+        if ((HALT_AT) == (n)) {                                       \
+            serial_puts("[socrates/arm64] halted at checkpoint " #n "\n"); \
+            halt_forever();                                           \
+        }                                                             \
+    } while (0)
+
+/*
  * Present the back buffer.
  *
  * Carries over the x86 build's row-skipping: comparing two rows in RAM
@@ -216,6 +241,15 @@ static void display_boot_animation(volatile uint32_t *vram,
 }
 
 void kmain(void) {
+    /*
+     * Before anything, including the first character of output. The UART
+     * is a device register, device registers are not mapped by anything
+     * Limine set up, and an unmapped access this early faults into a
+     * vector table that has not been installed yet. Printing first is not
+     * an option — this has to be the first statement in the kernel.
+     */
+    mmio_map_init();
+
     serial_puts("\n[socrates/arm64] kmain reached at EL1\n");
 
     /* Vectors first: from here on a fault says what it was instead of
@@ -224,7 +258,9 @@ void kmain(void) {
     timer_takeover();
     fpu_init();
     serial_puts("[socrates/arm64] vectors installed, timer disarmed, FP on\n");
+    mmu_report();
 
+    CHK(1);
     if (fb_request.response == NULL ||
         fb_request.response->framebuffer_count < 1) {
         serial_puts("[socrates/arm64] no framebuffer from Limine\n");
@@ -237,9 +273,18 @@ void kmain(void) {
     uint32_t pitch_px = (uint32_t)(fb->pitch / (fb->bpp / 8));
     volatile uint32_t *vram = (volatile uint32_t *)fb->address;
 
+    serial_puts("[socrates/arm64] fb addr "); serial_put_hex64((uint64_t)(uintptr_t)vram);
+    serial_puts(" pitch "); serial_put_u64(fb->pitch);
+    serial_puts(" bpp "); serial_put_u64(fb->bpp);
+    serial_puts("\n[socrates/arm64] fb PAR "); serial_put_hex64(mmu_probe_write((uint64_t)(uintptr_t)vram));
+    serial_puts("\n");
+    CHK(2);
+
     for (uint32_t row = 0; row < panel_h; row++)
         for (uint32_t col = 0; col < panel_w; col++)
             vram[row * pitch_px + col] = 0;
+
+    CHK(3);
 
     uint32_t w = panel_w > BUF_MAX_W ? BUF_MAX_W : panel_w;
     uint32_t h = panel_h > BUF_MAX_H ? BUF_MAX_H : panel_h;
@@ -249,14 +294,7 @@ void kmain(void) {
     serial_puts("  timer "); serial_put_u64(timer_hz() / 1000000);
     serial_puts(" MHz\n");
 
-    /*
-     * The boot animation is skipped for now. It decodes and presents
-     * correctly — verified at a steady 24 fps — but the machine stalls a
-     * fraction of a second into it for reasons not yet pinned down, and
-     * it is decoration rather than the point of this milestone. Enabling
-     * it is one line once the stall is understood.
-     */
-    if (0) display_boot_animation(vram, w, h, pitch_px);
+    display_boot_animation(vram, w, h, pitch_px);
     serial_puts("[socrates/arm64] boot animation done\n");
 
     mouse_x = (int32_t)(w / 2);
@@ -273,7 +311,8 @@ void kmain(void) {
     uint64_t frame_ticks = timer_hz() / 60;
     uint64_t next_frame = timer_count();
     uint64_t frames = 0;
-    uint64_t started_ms = timer_ms();
+    uint64_t last_report_ms = timer_ms();
+
 
     for (;;) {
         /* No keyboard yet, so nothing can be typed; drift the pointer
@@ -287,6 +326,7 @@ void kmain(void) {
 
         login_render(backbuf, w, h, mouse_x, mouse_y, "",
                      mouse_buttons, "Socrates BSD 9 - ARM64");
+        if (frames == 0) CHK(4);
 
         fill_rect(w, 0,     0,     w, 1, COLOR_GOLD);
         fill_rect(w, 0,     h - 1, w, 1, COLOR_GOLD);
@@ -294,16 +334,22 @@ void kmain(void) {
         fill_rect(w, w - 1, 0,     1, h, COLOR_GOLD);
 
         vga_flip(vram, w, h, pitch_px);
+        CHK(5);
 
         frames++;
         if (frames % 120 == 0) {
-            uint64_t ms = timer_ms() - started_ms;
+            /* Interval, not total. Dividing by time since boot reports the
+             * average over the whole run, which converges and stops
+             * showing what the renderer is doing now — the number worth
+             * watching while a driver lands underneath it. */
+            uint64_t now = timer_ms();
+            uint64_t ms  = now - last_report_ms;
+            last_report_ms = now;
             serial_puts("[socrates/arm64] 120 frames in ");
             serial_put_u64(ms);
             serial_puts(" ms (");
             serial_put_u64(ms ? (120 * 1000) / ms : 0);
             serial_puts(" fps)\n");
-            serial_puts("[socrates/arm64] milestone 1 complete\n");
         }
 
         next_frame += frame_ticks;
