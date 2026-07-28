@@ -26,6 +26,21 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIRMWARE = "/opt/homebrew/share/qemu/edk2-aarch64-code.fd"
 # Read-only: this is the volume with wiki.zim and the model on it.
 DISK = os.path.join(ROOT, "..", "Socrates BSD 9", "disk.img")
+
+# EDK2 keeps its variables in a second flash bank and wants one even when
+# empty. It is regenerated whenever it is missing or older than the ISO:
+# the firmware records the exact device path it booted from, and a stale
+# entry sends it to the UEFI shell instead of the disc the moment the
+# device set changes — which looks exactly like a kernel that failed to
+# load, and has cost this port an afternoon more than once.
+VARS = os.path.join(ROOT, "build", "efi-vars.fd")
+ISO = os.path.join(ROOT, "os.iso")
+if (not os.path.exists(VARS) or
+        (os.path.exists(ISO) and os.path.getmtime(VARS) < os.path.getmtime(ISO))):
+    os.makedirs(os.path.dirname(VARS), exist_ok=True)
+    with open(VARS, "wb") as fh:
+        fh.write(b"\0" * (64 << 20))
+
 QMP_PORT = 4483
 
 BOOT_WAIT = float(sys.argv[1]) if len(sys.argv) > 1 else 300.0
@@ -42,6 +57,8 @@ proc = subprocess.Popen([
     "-drive", f"if=none,id=d0,format=raw,readonly=on,file={DISK}",
     "-device", "virtio-blk-device,drive=d0",
 ] if os.path.exists(DISK) else []) + [
+    "-netdev", "user,id=n0",
+    "-device", "virtio-net-device,netdev=n0",
     "-global", "virtio-mmio.force-legacy=false",
     "-device", "virtio-keyboard-device",
     "-device", "virtio-tablet-device",

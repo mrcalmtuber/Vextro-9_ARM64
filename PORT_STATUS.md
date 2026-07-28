@@ -11,14 +11,19 @@ untouched and unaffected.
 | M1 | Console, exceptions, timer, render loop | done |
 | M2 | Input — keyboard and pointer | done |
 | M3 | Storage — virtio-blk, exFAT | done (PCIe ECAM not needed, see below) |
-| M4 | Network — virtio-net, TCP/IP, browser | not started |
+| M4 | Network — virtio-net, TCP/IP, HTTP | done (browser UI not wired) |
 | M5 | Userland — aarch64 `.bsd`, `svc #0`, app store | not started |
 | M6 | Model and Wikipedia | not started |
 | M7 | Real hardware — Raspberry Pi | not started |
 
 Boot animation plays, the login screen renders and animates at a locked
 **60 fps**, typing fills the password field, the pointer tracks the host
-cursor absolutely, and the 8 GB exFAT volume mounts and lists.
+cursor absolutely, the 8 GB exFAT volume mounts and lists, and the network
+stack pings its gateway and fetches a real page over HTTP.
+
+Every device — keyboard, tablet, disk, NIC — is virtio over MMIO, sharing
+one virtqueue implementation. That is why three milestones landed without
+the PCIe ECAM window the plan budgeted for.
 
 ## How to run it
 
@@ -93,6 +98,12 @@ are present, report version 1, and are skipped by a 1.0-only driver —
 indistinguishable from devices that were never attached. The kernel dumps
 every populated slot with its device ID and version so the two cases can
 be told apart.
+
+**netstack.h's ping counter is gated on `ping_active`.** Calling
+`icmp_send_echo` directly sends a perfectly good echo request whose reply
+arrives, parses, and is then dropped — indistinguishable from a gateway
+that never answered. Drive the stack's own state, not just its wire
+functions.
 
 **Adding a device invalidates `build/efi-vars.fd`.** EDK2 stores the PCI
 path it booted from; a stale entry sends it to the UEFI shell, which looks

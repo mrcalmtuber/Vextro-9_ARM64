@@ -2,268 +2,230 @@
 #define E1000_H
 
 #include <stdint.h>
-#include "idt.h"
-#include "pci.h"
+#include "virtio.h"
 
-/* ===== INTEL e1000 (8254x) NIC DRIVER ===== */
+/*
+ * The network adapter, behind the name the stack already calls.
+ *
+ * There is no e1000 here — the card is virtio-net. As with ata.h, the
+ * file keeps its name and its entry points because netstack.h is 1,200
+ * lines of portable IPv4/ICMP/UDP/DNS/TCP/HTTP that wants to hand over an
+ * Ethernet frame and be told when one arrives, and has no opinion about
+ * what carries it. The x86 original is kept as e1000_x86.h.ref.
+ *
+ * The e1000 driver it replaces is MMIO-based and would have *compiled*
+ * unchanged, which made porting it tempting. It would also have been
+ * wrong in a way that is hard to see: its descriptor-then-doorbell
+ * sequences carry no memory barriers at all, because x86 orders stores
+ * against each other and the code was written where that is free. On
+ * aarch64 nothing orders them, so the card can be told to transmit a
+ * descriptor it has not yet observed — a bug that appears as occasional
+ * dropped or corrupt frames under load and never reproduces on demand.
+ * Rather than retrofit barriers into a driver for a card this machine
+ * does not have, the traffic goes through the virtqueue layer milestones
+ * 2 and 3 already use, where the barriers are written once and shared.
+ *
+ * Header layout: with VIRTIO_F_VERSION_1 negotiated the per-packet header
+ * is always the 12-byte virtio_net_hdr_v1, including num_buffers, whether
+ * or not mergeable receive buffers were negotiated. Getting that length
+ * wrong shifts every frame by two bytes, which does not fail loudly — it
+ * produces frames whose EtherType is garbage and which the stack above
+ * silently discards.
+ */
 
-#define E1000_VENDOR_ID   0x8086
+#define VIRTIO_ID_NET 1
 
-/* 8254x family members this driver programs identically */
-static const uint16_t e1000_ids[] = {
-    0x100E,   /* 82540EM (QEMU default)   */
-    0x100F,   /* 82545EM                  */
-    0x1004,   /* 82543GC                  */
-    0
-};
+/* MAC is the only feature bit that changes what this driver must do:
+ * without it the device has no address to report and one would have to be
+ * invented. */
+#define VIRTIO_NET_F_MAC_BIT 5
 
-#define E1000_CTRL        0x0000
-#define E1000_STATUS      0x0008
-#define E1000_ICR         0x00C0
-#define E1000_IMS         0x00D0
-#define E1000_IMC         0x00D8
+#define VNET_HDR_LEN   12
+#define VNET_FRAME_MAX 1514
+#define VNET_BUF       (VNET_HDR_LEN + VNET_FRAME_MAX + 2)
 
-#define E1000_RCTL        0x0100
-#define E1000_RDBAL       0x2800
-#define E1000_RDBAH       0x2804
-#define E1000_RDLEN       0x2808
-#define E1000_RDH         0x2810
-#define E1000_RDT         0x2818
+#define VNET_RX_BUFS 32
+#define VNET_TX_BUFS 8
 
-#define E1000_TCTL        0x0400
-#define E1000_TDBAL       0x3800
-#define E1000_TDBAH       0x3804
-#define E1000_TDLEN       0x3808
-#define E1000_TDH         0x3810
-#define E1000_TDT         0x3818
+/* The surface netstack.h compiles against. */
+static uint8_t e1000_mac[6];
+static int     e1000_found = 0;
 
-#define E1000_RAL0        0x5400
-#define E1000_RAH0        0x5404
-#define E1000_MTA         0x5200
+static uint64_t vnet_base = 0;
+static virtq_t  vnet_rx, vnet_tx;
 
-#define E1000_CTRL_SLU    (1u << 6)
-#define E1000_CTRL_RST    (1u << 26)
+static struct vring_desc  vnet_rx_desc[VQ_SIZE] __attribute__((aligned(16)));
+static struct vring_avail vnet_rx_avail         __attribute__((aligned(16)));
+static struct vring_used  vnet_rx_used          __attribute__((aligned(16)));
+static struct vring_desc  vnet_tx_desc[VQ_SIZE] __attribute__((aligned(16)));
+static struct vring_avail vnet_tx_avail         __attribute__((aligned(16)));
+static struct vring_used  vnet_tx_used          __attribute__((aligned(16)));
 
-#define E1000_RCTL_EN     (1u << 1)
-#define E1000_RCTL_BAM    (1u << 15)
-#define E1000_RCTL_BSIZE  (0u << 16)  /* 2048-byte buffers */
-#define E1000_RCTL_SECRC  (1u << 26)
+static uint8_t vnet_rx_buf[VNET_RX_BUFS][VNET_BUF] __attribute__((aligned(64)));
+static uint8_t vnet_tx_buf[VNET_TX_BUFS][VNET_BUF] __attribute__((aligned(64)));
 
-#define E1000_TCTL_EN     (1u << 1)
-#define E1000_TCTL_PSP    (1u << 3)
-#define E1000_TCTL_CT     (0x0Fu << 4)
-#define E1000_TCTL_COLD   (0x40u << 12)
+static uint32_t vnet_tx_next = 0;
 
-#define E1000_STATUS_LU   (1u << 1)
+/* Counters, not decoration. "No reply" has three very different causes —
+ * nothing was sent, nothing came back, or something came back and the
+ * stack discarded it — and they are indistinguishable from the outside. */
+static uint32_t vnet_tx_count = 0;
+static uint32_t vnet_rx_count = 0;
 
-#define E1000_NUM_RX_DESC 128
-#define E1000_NUM_TX_DESC 128
-#define E1000_RX_BUF_SIZE 2048
+/*
+ * The receive buffer handed out by the last poll, still being read.
+ *
+ * netstack.h takes a pointer and a length and parses the frame in place
+ * before asking for the next one, so a buffer cannot go back to the
+ * device the moment it is dequeued — the stack is still looking at it.
+ * It is re-posted at the start of the following call instead. Returning
+ * it early is the kind of bug that only shows under load, when the device
+ * happens to refill the buffer mid-parse.
+ */
+static int vnet_pending = -1;
 
-struct e1000_rx_desc {
-    uint64_t addr;
-    uint16_t length;
-    uint16_t checksum;
-    uint8_t  status;
-    uint8_t  errors;
-    uint16_t special;
-} __attribute__((packed));
-
-struct e1000_tx_desc {
-    uint64_t addr;
-    uint16_t length;
-    uint8_t  cso;
-    uint8_t  cmd;
-    uint8_t  status;
-    uint8_t  css;
-    uint16_t special;
-} __attribute__((packed));
-
-static volatile uint8_t *e1000_mmio = 0;
-static int e1000_found = 0;
-
-static struct e1000_rx_desc e1000_rx_ring[E1000_NUM_RX_DESC] __attribute__((aligned(128)));
-static struct e1000_tx_desc e1000_tx_ring[E1000_NUM_TX_DESC] __attribute__((aligned(128)));
-static uint8_t e1000_rx_buffers[E1000_NUM_RX_DESC][E1000_RX_BUF_SIZE] __attribute__((aligned(4096)));
-static uint8_t e1000_tx_buffers[E1000_NUM_TX_DESC][E1000_RX_BUF_SIZE] __attribute__((aligned(4096)));
-
-static uint8_t  e1000_mac[6];
-static uint32_t e1000_rx_cur = 0;
-static uint32_t e1000_tx_cur = 0;
-
-static inline void e1000_write(uint32_t reg, uint32_t val) {
-    *(volatile uint32_t *)(e1000_mmio + reg) = val;
+static void vnet_post_rx(uint32_t slot) {
+    uint64_t p = virt_to_phys(vnet_rx_buf[slot]);
+    if (!p) return;
+    virtq_offer(vnet_base, 0, &vnet_rx, (uint16_t)slot, p, VNET_BUF, 1);
 }
-
-static inline uint32_t e1000_read(uint32_t reg) {
-    return *(volatile uint32_t *)(e1000_mmio + reg);
-}
-
-static void e1000_log(const char *msg) {
-    serial_puts("[e1000] ");
-    serial_puts(msg);
-    serial_putc('\n');
-}
-
-/* ===== RX/TX RING INITIALIZATION ===== */
-
-static void e1000_init_rx(void) {
-    for (int i = 0; i < E1000_NUM_RX_DESC; i++) {
-        e1000_rx_ring[i].addr   = kern_virt_to_phys(&e1000_rx_buffers[i][0]);
-        e1000_rx_ring[i].status = 0;
-    }
-
-    uint64_t rx_phys = kern_virt_to_phys((void *)e1000_rx_ring);
-    e1000_write(E1000_RDBAL, (uint32_t)(rx_phys & 0xFFFFFFFF));
-    e1000_write(E1000_RDBAH, (uint32_t)(rx_phys >> 32));
-    e1000_write(E1000_RDLEN, (uint32_t)(E1000_NUM_RX_DESC * sizeof(struct e1000_rx_desc)));
-    e1000_write(E1000_RDH, 0);
-    e1000_write(E1000_RDT, E1000_NUM_RX_DESC - 1);
-
-    e1000_write(E1000_RCTL, E1000_RCTL_EN | E1000_RCTL_BAM |
-                             E1000_RCTL_BSIZE | E1000_RCTL_SECRC);
-}
-
-static void e1000_init_tx(void) {
-    for (int i = 0; i < E1000_NUM_TX_DESC; i++) {
-        e1000_tx_ring[i].addr   = 0;
-        e1000_tx_ring[i].status = 1;  /* DD bit set = descriptor done */
-        e1000_tx_ring[i].cmd    = 0;
-    }
-
-    uint64_t tx_phys = kern_virt_to_phys((void *)e1000_tx_ring);
-    e1000_write(E1000_TDBAL, (uint32_t)(tx_phys & 0xFFFFFFFF));
-    e1000_write(E1000_TDBAH, (uint32_t)(tx_phys >> 32));
-    e1000_write(E1000_TDLEN, (uint32_t)(E1000_NUM_TX_DESC * sizeof(struct e1000_tx_desc)));
-    e1000_write(E1000_TDH, 0);
-    e1000_write(E1000_TDT, 0);
-
-    e1000_write(E1000_TCTL, E1000_TCTL_EN | E1000_TCTL_PSP |
-                             E1000_TCTL_CT | E1000_TCTL_COLD);
-}
-
-static void e1000_clear_mta(void) {
-    for (uint32_t i = 0; i < 128; i++)
-        e1000_write(E1000_MTA + i * 4, 0);
-}
-
-/* ===== MAIN INITIALIZATION ===== */
-
-static void e1000_init(uint64_t hhdm_offset) {
-    hal_hhdm_offset = hhdm_offset;
-
-    serial_init();
-    e1000_log("Scanning PCI bus for Intel 8254x NIC...");
-
-    pci_dev_t dev;
-    if (!pci_find_ids(E1000_VENDOR_ID, e1000_ids, &dev)) {
-        e1000_log("Device not found on PCI bus");
-        return;
-    }
-    e1000_log("Device found on PCI bus");
-
-    pci_enable(&dev, PCI_CMD_MEM | PCI_CMD_MASTER);
-
-    uint64_t mmio_phys, mmio_size;
-    if (pci_bar(&dev, 0, &mmio_phys, &mmio_size) != 0) {
-        e1000_log("BAR0 is not a memory BAR - aborting");
-        return;
-    }
-    if (mmio_size < 0x20000) mmio_size = 0x20000;
-
-    e1000_mmio = mmio_map(mmio_phys, mmio_size);
-    if (!e1000_mmio) {
-        e1000_log("MMIO mapping failed - aborting");
-        return;
-    }
-    e1000_log("BAR0 MMIO region mapped into kernel address space");
-
-    /* Mask all interrupts */
-    e1000_write(E1000_IMC, 0xFFFFFFFF);
-    e1000_read(E1000_ICR);
-
-    /* Global device reset */
-    uint32_t ctrl = e1000_read(E1000_CTRL);
-    ctrl |= E1000_CTRL_RST;
-    e1000_write(E1000_CTRL, ctrl);
-
-    for (volatile int i = 0; i < 100000; i++);
-
-    e1000_write(E1000_IMC, 0xFFFFFFFF);
-    e1000_read(E1000_ICR);
-
-    e1000_log("Device reset complete, interrupts masked");
-
-    ctrl = e1000_read(E1000_CTRL);
-    ctrl |= E1000_CTRL_SLU;
-    e1000_write(E1000_CTRL, ctrl);
-
-    e1000_clear_mta();
-    e1000_init_rx();
-    e1000_init_tx();
-
-    e1000_log("RX ring: 128 descriptors, 2KB buffers allocated");
-    e1000_log("TX ring: 128 descriptors initialized");
-
-    uint32_t status = e1000_read(E1000_STATUS);
-    if (status & E1000_STATUS_LU) {
-        e1000_log("Link Status: UP");
-    } else {
-        e1000_log("Link Status: DOWN");
-    }
-
-    e1000_found = 1;
-    e1000_log("Driver initialization complete");
-}
-
-/* ===== MAC ADDRESS READ ===== */
 
 static void e1000_read_mac(void) {
-    uint32_t ral = e1000_read(E1000_RAL0);
-    uint32_t rah = e1000_read(E1000_RAH0);
-    e1000_mac[0] = (uint8_t)(ral & 0xFF);
-    e1000_mac[1] = (uint8_t)((ral >> 8)  & 0xFF);
-    e1000_mac[2] = (uint8_t)((ral >> 16) & 0xFF);
-    e1000_mac[3] = (uint8_t)((ral >> 24) & 0xFF);
-    e1000_mac[4] = (uint8_t)(rah & 0xFF);
-    e1000_mac[5] = (uint8_t)((rah >> 8)  & 0xFF);
+    if (!e1000_found) return;
+    volatile uint8_t *cfg = (volatile uint8_t *)mmio32(vnet_base + VIO_CONFIG);
+    for (int i = 0; i < 6; i++) e1000_mac[i] = cfg[i];
 }
 
-/* ===== RX POLL / TX SUBMIT ===== */
+/*
+ * Send one frame.
+ *
+ * Copied into a driver-owned buffer rather than described in place: the
+ * caller's frame lives in a scratch global it reuses immediately, and the
+ * device reads asynchronously. Buffers rotate so a slow device does not
+ * stall the next send, and completions are reaped rather than waited on —
+ * nothing above this blocks on a transmit.
+ */
+static int e1000_transmit(const uint8_t *data, uint16_t len) {
+    if (!e1000_found) return -1;
+    if (len > VNET_FRAME_MAX) return -1;
+
+    while (virtq_has_used(&vnet_tx)) virtq_take(&vnet_tx);
+
+    uint32_t slot = vnet_tx_next;
+    vnet_tx_next = (vnet_tx_next + 1) % VNET_TX_BUFS;
+
+    uint8_t *b = vnet_tx_buf[slot];
+    for (int i = 0; i < VNET_HDR_LEN; i++) b[i] = 0;
+    for (uint16_t i = 0; i < len; i++) b[VNET_HDR_LEN + i] = data[i];
+
+    uint64_t p = virt_to_phys(b);
+    if (!p) return -1;
+
+    virtq_offer(vnet_base, 1, &vnet_tx, (uint16_t)slot, p,
+                VNET_HDR_LEN + len, 0);
+    vnet_tx_count++;
+    return 0;
+}
 
 static int e1000_rx_poll(uint8_t **out_buf, uint16_t *out_len) {
-    struct e1000_rx_desc *desc = &e1000_rx_ring[e1000_rx_cur];
-    if (!(desc->status & 0x01))
+    if (!e1000_found) return 0;
+
+    if (vnet_pending >= 0) {            /* the stack has finished with it */
+        vnet_post_rx((uint32_t)vnet_pending);
+        vnet_pending = -1;
+    }
+
+    if (!virtq_has_used(&vnet_rx)) return 0;
+
+    struct vring_used_elem *e = virtq_take(&vnet_rx);
+    uint32_t slot = e->id;
+    if (slot >= VNET_RX_BUFS) return 0;
+
+    uint32_t total = e->len;
+    if (total <= VNET_HDR_LEN) {        /* header only: nothing to parse */
+        vnet_post_rx(slot);
         return 0;
+    }
 
-    *out_buf = e1000_rx_buffers[e1000_rx_cur];
-    *out_len = desc->length;
+    uint32_t flen = total - VNET_HDR_LEN;
+    if (flen > VNET_FRAME_MAX) flen = VNET_FRAME_MAX;
 
-    desc->status = 0;
-    uint32_t old = e1000_rx_cur;
-    e1000_rx_cur = (e1000_rx_cur + 1) % E1000_NUM_RX_DESC;
-    e1000_write(E1000_RDT, old);
+    DMB();                              /* the device wrote it; see all of it */
+    vnet_rx_count++;
+    *out_buf = vnet_rx_buf[slot] + VNET_HDR_LEN;
+    *out_len = (uint16_t)flen;
+    vnet_pending = (int)slot;
 
+    uint32_t st = vio_rd(vnet_base, VIO_INT_STATUS);
+    if (st) vio_wr(vnet_base, VIO_INT_ACK, st);
     return 1;
 }
 
-static int e1000_transmit(const uint8_t *data, uint16_t len) {
-    struct e1000_tx_desc *desc = &e1000_tx_ring[e1000_tx_cur];
-    if (!(desc->status & 0x01))
-        return -1;
+/*
+ * The hhdm argument is vestigial — it is what the x86 driver needed to
+ * turn Limine's physical descriptor addresses into something it could
+ * dereference. Here every address handed to the device comes from asking
+ * the MMU, so nothing is offset by hand. The parameter stays so kernel.c
+ * reads the same on both trees.
+ */
+static void e1000_init(uint64_t hhdm_offset) {
+    (void)hhdm_offset;
+    e1000_found = 0;
 
-    for (uint16_t i = 0; i < len; i++)
-        e1000_tx_buffers[e1000_tx_cur][i] = data[i];
+    vnet_base = virtio_find(VIRTIO_ID_NET, 0);
+    if (!vnet_base) {
+        serial_puts("[socrates/arm64] virtio-net: no device\n");
+        return;
+    }
 
-    desc->addr   = kern_virt_to_phys(&e1000_tx_buffers[e1000_tx_cur][0]);
-    desc->length = len;
-    desc->cmd    = 0x0B;   /* EOP | IFCS | RS */
-    desc->status = 0;
+    /* Reset, then negotiate MAC alongside VERSION_1. virtio_begin() is
+     * not reused here because it offers VERSION_1 only, and the address
+     * is worth having. */
+    vio_wr(vnet_base, VIO_STATUS, 0);
+    DSB();
+    vio_wr(vnet_base, VIO_STATUS, VIO_STATUS_ACK);
+    vio_wr(vnet_base, VIO_STATUS, VIO_STATUS_ACK | VIO_STATUS_DRIVER);
 
-    e1000_tx_cur = (e1000_tx_cur + 1) % E1000_NUM_TX_DESC;
-    e1000_write(E1000_TDT, e1000_tx_cur);
+    vio_wr(vnet_base, VIO_DRV_FEAT_SEL, 1);
+    vio_wr(vnet_base, VIO_DRV_FEAT, 1u << (VIRTIO_F_VERSION_1_BIT - 32));
+    vio_wr(vnet_base, VIO_DRV_FEAT_SEL, 0);
+    vio_wr(vnet_base, VIO_DRV_FEAT, 1u << VIRTIO_NET_F_MAC_BIT);
 
-    return 0;
+    vio_wr(vnet_base, VIO_STATUS,
+           VIO_STATUS_ACK | VIO_STATUS_DRIVER | VIO_STATUS_FEATURES_OK);
+    DSB();
+    if (!(vio_rd(vnet_base, VIO_STATUS) & VIO_STATUS_FEATURES_OK)) {
+        vio_wr(vnet_base, VIO_STATUS, VIO_STATUS_FAILED);
+        serial_puts("[socrates/arm64] virtio-net: features refused\n");
+        return;
+    }
+
+    if (!virtq_setup(vnet_base, 0, &vnet_rx,
+                     vnet_rx_desc, &vnet_rx_avail, &vnet_rx_used) ||
+        !virtq_setup(vnet_base, 1, &vnet_tx,
+                     vnet_tx_desc, &vnet_tx_avail, &vnet_tx_used)) {
+        serial_puts("[socrates/arm64] virtio-net: queues would not start\n");
+        return;
+    }
+
+    virtio_ready(vnet_base);
+    e1000_found = 1;
+
+    /* Receive buffers must be posted before the first packet arrives, or
+     * it is dropped with nowhere to land. */
+    for (uint32_t i = 0; i < VNET_RX_BUFS && i < vnet_rx.qsize; i++)
+        vnet_post_rx(i);
+
+    e1000_read_mac();
+
+    serial_puts("[socrates/arm64] virtio-net: up, MAC ");
+    static const char hx[] = "0123456789ABCDEF";
+    for (int i = 0; i < 6; i++) {
+        if (i) serial_putc(':');
+        serial_putc(hx[(e1000_mac[i] >> 4) & 0xF]);
+        serial_putc(hx[e1000_mac[i] & 0xF]);
+    }
+    serial_puts("\n");
 }
 
 #endif /* E1000_H */

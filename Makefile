@@ -143,8 +143,14 @@ QEMU_COMMON := -M virt -m 2048 $(QEMU_CPU) -accel $(ACCEL) \
 	-global virtio-mmio.force-legacy=false \
 	-device virtio-keyboard-device \
 	-device virtio-tablet-device \
+	$(QEMU_NET) \
 	$(QEMU_DISK) \
 	-cdrom os.iso
+
+# User-mode networking: no privileges, no bridge, and its fixed addressing
+# (10.0.2.15/24, gateway .2, DNS .3) is exactly what netstack.h already
+# defaults to, so nothing needs configuring on either side.
+QEMU_NET := -netdev user,id=n0 -device virtio-net-device,netdev=n0
 
 # The data disk, if one is present. virtio-blk over the same MMIO
 # transports as input, which is what let the storage milestone skip the

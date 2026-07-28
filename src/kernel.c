@@ -7,12 +7,14 @@
 #include "ata.h"
 #include "gfx.h"                /* rtc_read: exFAT timestamps entries */
 #include "exfat.h"
+#include "e1000.h"
+#include "netstack.h"
 #include "ttf.h"
 #include "login.h"
 #include "boot_animation.h"
 
 /*
- * Socrates BSD 9 for ARM64 — milestone 1.
+ * Socrates BSD 9 for ARM64.
  *
  * The machine now has a console, exception vectors, a time source and a
  * paced render loop, which is enough for the whole portable rendering
@@ -28,8 +30,11 @@
  * the GIC before a device needs it would be shipping untested code, so
  * it arrives with the first driver that actually raises an interrupt.
  *
- * Input is stubbed at this milestone (see the note by the globals), so
- * the login screen animates but cannot yet be typed into. That is M2.
+ * Input, storage and networking are real: virtio-input drives the
+ * keyboard and an absolute pointer, virtio-blk carries an exFAT volume,
+ * and virtio-net carries a stack that resolves names and fetches pages.
+ * All three ride the same virtqueue layer, which is why the port needed
+ * no PCIe bus walk to get here.
  */
 
 /* ---- Limine requests ---- */
@@ -308,6 +313,9 @@ void kmain(void) {
      * animation has played out. */
     ata_init();
 
+    e1000_init(hhdm_request.response ? hhdm_request.response->offset : 0);
+    netstack_init();
+
     display_boot_animation(vram, w, h, pitch_px);
     serial_puts("[socrates/arm64] boot animation done\n");
 
@@ -372,6 +380,9 @@ void kmain(void) {
     int32_t last_mx = -1, last_my = -1;
     uint8_t last_mb = 0;
 
+    int net_selftest_sent = 0, net_selftest_seen = 0;
+    int net_fetch_started = 0, net_fetch_reported = 0;
+
 
     for (;;) {
         /* Poll phase. Devices are drained once per frame rather than from
@@ -379,6 +390,81 @@ void kmain(void) {
          * and a used-ring index costs less to read than an interrupt
          * costs to route. */
         vtinput_poll();
+        net_poll();
+
+        /*
+         * Ping the gateway a few times at start-up and report what came
+         * back.
+         *
+         * Enumerating a NIC and reading its MAC proves the transport came
+         * up, not that a packet can make a round trip: ARP has to resolve,
+         * a frame has to reach the host, and a reply has to land in a
+         * buffer this driver posted. Sending one is cheap and the answer
+         * is unambiguous. It runs from the loop rather than at init
+         * because replies only arrive once something is polling for them.
+         */
+        if (e1000_found && net_selftest_sent < 4 &&
+            frames > 30 && (frames % 60) == 0) {
+            /* ping_active is what tells the reply handler these are ours;
+             * without it the echo replies arrive, parse correctly and are
+             * dropped on the floor, which looks exactly like a network
+             * that cannot reach the gateway. */
+            ping_active = 1;
+            ping_sent_tick = net_ticks;
+            icmp_send_echo(net_gw_ip, (uint16_t)net_selftest_sent);
+            net_selftest_sent++;
+        }
+        /*
+         * One real HTTP fetch, after the pings have proved the link.
+         *
+         * This is the whole upper stack in one request — DNS resolution,
+         * the TCP handshake, a GET, a chunked or content-length body, and
+         * the redirect budget — none of which ICMP touches. It is the
+         * thing the browser does, minus the rendering.
+         */
+        if (e1000_found && !net_fetch_started && frames == 360) {
+            net_fetch_started = 1;
+            http_get("example.com", 80, "/");
+            serial_puts("[socrates/arm64] http: GET http://example.com/\n");
+        }
+        if (net_fetch_started && !net_fetch_reported &&
+            (http_state == HTTP_DONE || http_state == HTTP_ERROR)) {
+            net_fetch_reported = 1;
+            if (http_state == HTTP_DONE) {
+                serial_puts("[socrates/arm64] http: status ");
+                serial_put_u64((uint64_t)http_status_code);
+                serial_puts(", ");
+                serial_put_u64((uint64_t)http_body_len);
+                serial_puts(" bytes of body\n");
+            } else {
+                serial_puts("[socrates/arm64] http: failed - ");
+                serial_puts(http_err);
+                serial_puts("\n");
+            }
+        }
+
+        if (e1000_found && frames == 400) {
+            /* Frame counts separate the three ways "no reply" happens:
+             * nothing sent, nothing received, or received and discarded
+             * upstream. Each needs a different next question. */
+            serial_puts("[socrates/arm64] net: tx ");
+            serial_put_u64(vnet_tx_count);
+            serial_puts(" frames, rx ");
+            serial_put_u64(vnet_rx_count);
+            serial_puts(" frames, arp entries ");
+            int n = 0;
+            for (int i = 0; i < ARP_CACHE_SIZE; i++) if (arp_cache[i].valid) n++;
+            serial_put_u64((uint64_t)n);
+            serial_puts("\n");
+        }
+        if (e1000_found && ping_replies != net_selftest_seen) {
+            net_selftest_seen = ping_replies;
+            serial_puts("[socrates/arm64] icmp reply from gateway (");
+            serial_put_u64((uint64_t)net_selftest_seen);
+            serial_puts(" of ");
+            serial_put_u64((uint64_t)net_selftest_sent);
+            serial_puts(")\n");
+        }
 
         /* Report the pointer only when it moves. A per-frame log would
          * bury everything else at 60 Hz, and the interesting question —
