@@ -221,8 +221,9 @@ void kmain(void) {
     /* Vectors first: from here on a fault says what it was instead of
      * hanging, which matters more the more driver code arrives. */
     exceptions_init();
+    timer_takeover();
     fpu_init();
-    serial_puts("[socrates/arm64] vectors installed, FP enabled\n");
+    serial_puts("[socrates/arm64] vectors installed, timer disarmed, FP on\n");
 
     if (fb_request.response == NULL ||
         fb_request.response->framebuffer_count < 1) {
@@ -295,7 +296,7 @@ void kmain(void) {
         vga_flip(vram, w, h, pitch_px);
 
         frames++;
-        if (frames == 120) {
+        if (frames % 120 == 0) {
             uint64_t ms = timer_ms() - started_ms;
             serial_puts("[socrates/arm64] 120 frames in ");
             serial_put_u64(ms);

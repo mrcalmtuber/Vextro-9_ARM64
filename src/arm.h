@@ -131,10 +131,15 @@ static uint64_t timer_ms(void) {
  * frame rate instead, which is something you can see and measure.
  */
 static void timer_wait_until(uint64_t until) {
-    uint64_t guard = 0;
-    while (timer_count() < until) {
-        __asm__ volatile("yield");
-        if (++guard > 200000000ULL) return;
+    /*
+     * Bounded by a count small enough that overrunning it costs a frame,
+     * not a minute. `yield` is deliberately absent: it is only a hint on
+     * real silicon, but under a hypervisor it can trap, which turns a
+     * spin that was meant to be cheap into one that leaves the machine
+     * apparently dead. Reading the counter is enough of a pause.
+     */
+    for (uint32_t i = 0; i < 4000000u; i++) {
+        if (timer_count() >= until) return;
     }
 }
 
@@ -149,6 +154,23 @@ static void fpu_init(void) {
     uint64_t cpacr = SYSREG_READ(cpacr_el1);
     cpacr |= (3ULL << 20);              /* FPEN = 0b11, no trapping at EL0/EL1 */
     SYSREG_WRITE(cpacr_el1, cpacr);
+    ISB();
+}
+
+/*
+ * Take the machine over from the firmware.
+ *
+ * EDK2 runs its own periodic tick off the EL1 physical timer and leaves
+ * it armed when it hands control on. Nothing turns it off in between, so
+ * the first comparator match after we arrive raises PPI 30 into an
+ * interrupt controller this kernel has not configured — and the CPU
+ * takes an exception out of the middle of whatever it was doing. Masking
+ * interrupts and disarming the timer is the first thing a kernel should
+ * do with inherited hardware, and costs two register writes.
+ */
+static void timer_takeover(void) {
+    irq_disable();
+    SYSREG_WRITE(cntp_ctl_el0, 0);      /* disable, unmask; no comparator */
     ISB();
 }
 
