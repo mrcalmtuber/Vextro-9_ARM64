@@ -47,32 +47,44 @@ this port needs to write to it yet. `DISK=` and `DISK_RO=off` override.
 TCG needs roughly 250 s to get through EDK2 and the boot animation before
 the login screen appears. That is emulation speed, not a bug.
 
-## The one open problem: hvf
+## hvf works, and here is what was wrong
 
-Running on the actual CPU is the whole reason for an ARM64 build, and it
-does not work yet. qemu 11.0.3's hvf backend aborts this guest:
+For most of this port qemu's hvf backend aborted the guest with
+`Assertion failed: (isv)` about half a second into any kernel that was
+executing instructions. It reproduced with the render loop replaced by an
+empty spin, with the framebuffer never touched, with no display device
+attached, and under every GIC variant — but never in a guest parked in
+`wfi`, and never under tcg.
 
-```
-Assertion failed: (isv), function hvf_handle_exception, file hvf.c, line 2268
-```
+The cause was one bound in `mmio_map_init()`. The kernel identity-maps
+RAM as Normal memory, and the loop ran to a hardcoded 4 GB while the
+machine only had 2 GB. **Normal memory is speculatable** — the core may
+fetch from it unasked, because the architecture guarantees that reading
+backed memory has no side effects. Mapping a gigabyte that nothing backs
+voids that guarantee, and the core eventually speculates into a physical
+address no device answers for. hvf sees a stage-2 fault whose instruction
+syndrome cannot be decoded, because there was no instruction — and
+asserts.
 
-The abort is **not conditional on anything the kernel does**. It
-reproduces with:
+That explains every symptom: it needs execution (speculation does not
+happen in `wfi`), it is unrelated to what the code does (the access is not
+in the code), and tcg never shows it (emulation does not speculate).
 
-- the render loop replaced by an empty counted spin
-- the framebuffer never touched
-- no display device attached at all
-- `gic-version=2`, `gic-version=3` and `highmem=off` alike
-- both timers disarmed, all four DAIF bits masked, both ends of the GIC
-  quiet
+The bound now comes from Limine's memory map. Verified clean at `-m 1024`,
+`-m 2048` and `-m 4096` — a constant would only ever have been right for
+one of them.
 
-A guest parked in `wfi` never triggers it; a guest executing instructions
-does, after about half a second. The same binary runs indefinitely under
-tcg at a steady 60 fps.
+**What it bought**, same measurement under each accelerator:
 
-Not yet tried: attaching a debugger to qemu itself to read the guest PC at
-the abort (lldb cannot drive an hvf guest without the right entitlements),
-or a newer qemu.
+| | tcg | hvf |
+|---|---:|---:|
+| Prompt eval to first token | 41,374 ms | **3,359 ms** |
+| 397 MB of weights resident | 1,079 ms | **426 ms** |
+| Boot to kernel | ~200 s | ~5 s |
+
+`EXTRA=-DBAREMIN` builds a kernel that spins and does nothing else. That
+is what proved the fault was in this code rather than in the handover —
+it runs indefinitely under hvf, so bisecting forward from it was possible.
 
 ## Porting the desktop
 

@@ -131,26 +131,11 @@ os.iso: $(ISO)/boot/kernel $(ISO)/boot/limine/limine.conf
 		$(ISO) 2>&1 | tail -3
 
 # --- Run ---
-# Defaults to tcg, which is not where this port wants to end up.
-#
-# Running on the actual CPU under hvf is the whole reason for an ARM64
-# build, and it is where the model and the desktop become usable. But
-# qemu 11.0.3's hvf backend aborts this guest — `Assertion failed: (isv)`,
-# an MMIO exit whose instruction syndrome it declines to decode — and the
-# abort is not conditional on anything this kernel does. It reproduces
-# with the render loop replaced by an empty counted spin, with the
-# framebuffer never touched, with no display device attached at all, and
-# under gic-version=2, gic-version=3 and highmem=off alike. A guest parked
-# in wfi never triggers it; a guest executing instructions does, after
-# about half a second. The same binary runs indefinitely under tcg at a
-# steady 60 fps.
-#
-# So the default is the one that works, and ACCEL=hvf is one word away for
-# anyone retesting against a newer qemu. tcg has independent value anyway:
-# emulation enforces weaker memory ordering than Apple silicon does, so it
-# catches missing barriers that hvf would hide — which matters as soon as
-# virtio descriptors arrive.
-ACCEL ?= tcg
+# hvf: the guest runs on the actual CPU, which is the entire reason for an
+# ARM64 build. ACCEL=tcg is kept because emulation enforces weaker memory
+# ordering than Apple silicon does, so it catches missing barriers that
+# hvf would hide — which matters wherever virtio descriptors are written.
+ACCEL ?= hvf
 ifeq ($(ACCEL),hvf)
 QEMU_CPU := -cpu host
 else

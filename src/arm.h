@@ -349,6 +349,12 @@ static uint64_t virt_to_phys(const void *p) {
     return (par & 0x0000FFFFFFFFF000ULL) | (va & 0xFFF);
 }
 
+/*
+ * Highest physical address the firmware says is backed, rounded up to a
+ * gigabyte. Set from Limine's memory map before mmio_map_init() runs.
+ */
+static uint64_t ram_top_gb = 4;
+
 static void mmio_map_init(void) {
     for (int i = 0; i < 512; i++) { dev_l0[i] = 0; dev_l1[i] = 0; dev_l2[i] = 0; }
 
@@ -401,15 +407,31 @@ static void mmio_map_init(void) {
     dev_l1[0] = virt_to_phys(dev_l2) | PTE_TABLE;
 
     /*
-     * 1 GB..4 GB identity as Normal memory, which is where the `virt`
-     * machine puts RAM. Limine mapped this too, and replacing TTBR0
+     * Identity-map the gigabytes that actually contain RAM, as Normal
+     * memory, and not one gigabyte more.
+     *
+     * The upper bound is the important part, and getting it wrong cost
+     * this port more time than anything else. Normal memory is
+     * speculatable: the CPU may fetch from it without being asked,
+     * because the architecture guarantees that reading backed memory has
+     * no side effects. Map a range that is *not* backed and that
+     * guarantee is void — the core will eventually speculate into a
+     * physical address nothing answers for.
+     *
+     * Under emulation that is harmless, since tcg does not speculate. On
+     * real silicon under a hypervisor it is a stage-2 fault on an access
+     * with no instruction syndrome to decode, and qemu's hvf backend
+     * responds by aborting the process: `Assertion failed: (isv)`. It
+     * fires half a second into any guest that is executing instructions,
+     * never in one parked in wfi, and bears no relation to what the code
+     * was doing — because the access was never in the code.
+     *
+     * So the bound comes from the firmware's memory map rather than from
+     * a constant. Limine mapped this range too, and replacing TTBR0
      * without it would unmap anything the bootloader reported by physical
-     * address — the framebuffer among them — turning a device-mapping fix
-     * into a framebuffer bug. Inner-shareable and cacheable so these
-     * addresses behave identically to the same memory seen through the
-     * higher-half map.
+     * address — the framebuffer among them.
      */
-    for (uint64_t g = 1; g < 4; g++) {
+    for (uint64_t g = 1; g < ram_top_gb; g++) {
         dev_l1[g] = (g << 30) | PTE_BLOCK | PTE_ATTR(0) | PTE_AP_RW |
                     (3ULL << 8) | PTE_AF | PTE_PXN | PTE_UXN;
     }

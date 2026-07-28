@@ -215,18 +215,18 @@ with `DISK=` and `DISK_RO=off`.
 
 ### Accelerator
 
-`ACCEL` defaults to `tcg`. Running on the real CPU under `hvf` is the
-entire reason for an ARM64 build, and it does not work yet: qemu 11.0.3's
-hvf backend aborts this guest with `Assertion failed: (isv)`. The abort is
-not conditional on anything the kernel does — it reproduces with the
-render loop replaced by an empty spin, with the framebuffer never touched,
-with no display device attached, and under `gic-version=2`,
-`gic-version=3` and `highmem=off` alike. A guest parked in `wfi` never
-triggers it; a guest executing instructions does, after about half a
-second.
+`ACCEL` defaults to `hvf` — the guest runs on the actual CPU, which is the
+entire reason for an ARM64 build. `ACCEL=tcg` still works and is worth
+running occasionally: emulation enforces weaker memory ordering than Apple
+silicon does, so it catches missing barriers that hvf would hide.
 
-So **everything below runs under emulation**, and the timings reflect that
-rather than the hardware.
+The difference, same measurement under each:
+
+| | tcg | hvf |
+|---|---:|---:|
+| Prompt eval to first token | 41,374 ms | **3,359 ms** |
+| 397 MB of weights resident | 1,079 ms | **426 ms** |
+| Boot to kernel | ~200 s | ~5 s |
 
 ### Display
 
@@ -325,11 +325,8 @@ Milestones M0-M7 are complete and verified under emulation:
 | M6 | Model + offline Wikipedia | ZIM v6, 399,853 entries; model answers " Paris" |
 | M7 | Device tree | UART/RTC/GIC/virtio all read from the tree |
 
-**Two things are honestly incomplete:**
+**One thing is honestly incomplete:**
 
-- **hvf does not work**, and it is the reason this port exists. Everything
-  runs under tcg, so the model takes ~41 s per token rather than being
-  usable. The arithmetic is proven correct; the speed is not delivered.
 - **The Raspberry Pi drivers are not written** — mailbox framebuffer, SD,
   USB. There is no Pi here to test against, and shipping untested drivers
   for hardware nobody has run is not worth doing. The device tree work is

@@ -383,6 +383,18 @@ static void display_boot_animation(volatile uint32_t *vram,
 }
 
 void kmain(void) {
+#ifdef BAREMIN
+    /*
+     * The smallest possible guest: no page tables, no vectors, no serial,
+     * no devices. If this aborts under hvf then nothing this kernel does
+     * is responsible, and the fault is in the handover or the hypervisor
+     * rather than in the port.
+     */
+    {
+        volatile uint64_t n = 0;
+        for (;;) n++;
+    }
+#endif
     /*
      * Before anything, including the first character of output. The UART
      * is a device register, device registers are not mapped by anything
@@ -390,6 +402,21 @@ void kmain(void) {
      * vector table that has not been installed yet. Printing first is not
      * an option — this has to be the first statement in the kernel.
      */
+    /*
+     * Establish how much physical memory is real before mapping any of
+     * it. This has to precede the first line of output, because the UART
+     * is reached through the tables mmio_map_init() builds.
+     */
+    if (memmap_request.response) {
+        uint64_t top = 0;
+        for (uint64_t i = 0; i < memmap_request.response->entry_count; i++) {
+            struct limine_memmap_entry *e = memmap_request.response->entries[i];
+            uint64_t end = e->base + e->length;
+            if (end > top) top = end;
+        }
+        if (top) ram_top_gb = (top + (1ull << 30) - 1) >> 30;
+    }
+
     app_region_init();
     mmio_map_init();
 
