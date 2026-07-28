@@ -63,8 +63,29 @@ build/kernel.o: src/kernel.c $(wildcard src/*.h) kernel/include/boot_animation.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c $< -o $@
 
-build/kernel: build/kernel.o build/vectors.o build/boot_animation_data.o linker.ld
-	$(LD) $(LDFLAGS) build/kernel.o build/vectors.o build/boot_animation_data.o -o $@
+# --- The demo application, built for aarch64 and embedded ---
+#
+# apps/app.ld now says elf64-littleaarch64 and apps/socrates.h issues
+# `svc #0` instead of `int $0x80`, but hello.c itself is unchanged: the
+# syscall numbers and their argument meanings are the same on both
+# architectures, so only the header that reaches them differs.
+build/bsd_maker: bsdfmt/bsd_maker.c
+	@mkdir -p build
+	cc -O2 -o $@ $<
+
+build/hello.bsd: apps/hello.c apps/socrates.h apps/app.ld build/bsd_maker
+	@mkdir -p build
+	$(CC) $(CFLAGS) -Iapps -nostdlib -c apps/hello.c -o build/hello.o
+	$(LD) -nostdlib -no-pie -T apps/app.ld build/hello.o -o build/hello.elf
+	aarch64-elf-objcopy -O binary build/hello.elf build/hello.bin
+	./build/bsd_maker -o $@ -t build/hello.bin --text-vaddr 0x1000 --entry 0x1000
+
+build/hello_bsd_data.o: src/hello_bsd_data.S build/hello.bsd
+	@mkdir -p build
+	$(CC) $(CFLAGS) -c $< -o $@
+
+build/kernel: build/kernel.o build/vectors.o build/boot_animation_data.o build/hello_bsd_data.o linker.ld
+	$(LD) $(LDFLAGS) build/kernel.o build/vectors.o build/boot_animation_data.o build/hello_bsd_data.o -o $@
 
 # --- ISO root ---
 build/res.stamp: FORCE

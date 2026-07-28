@@ -9,6 +9,7 @@
 #include "exfat.h"
 #include "e1000.h"
 #include "netstack.h"
+#include "bsdload.h"
 #include "ttf.h"
 #include "login.h"
 #include "boot_animation.h"
@@ -127,6 +128,70 @@ static void boot_list_entry(const char *name, uint32_t size, int is_dir) {
 
 static void halt_forever(void) {
     for (;;) __asm__ volatile("wfi");
+}
+
+/* ---- the system call table ---- */
+
+/*
+ * Where a running app's pixels land.
+ *
+ * The x86 build draws into the terminal window's client area, which is
+ * where an app's canvas belongs once there is a window manager to own
+ * one. Until the desktop is wired up here, the canvas sits at a fixed
+ * offset on screen. What the ABI actually promises — the syscall numbers,
+ * the argument meanings, the clipping — is identical either way; moving
+ * it into a window later changes two constants.
+ */
+static uint32_t app_canvas_x = 100, app_canvas_y = 150;
+static uint32_t app_screen_w = 0,   app_screen_h = 0;
+static int      app_wants_exit = 0;
+
+#define APP_CANVAS_W 598
+#define APP_CANVAS_H 402
+
+/*
+ * Called from the SVC trampoline in vectors.S.
+ *
+ * Ordinary C reached by an ordinary `bl`, with no interrupt attribute,
+ * because the trampoline has already saved everything the AAPCS does not.
+ * That is why the x86 build's __attribute__((interrupt)) — which GCC
+ * implements only for x86, and which the port plan called its highest
+ * risk — needed no counterpart here at all.
+ */
+uint64_t arm_syscall(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2) {
+    switch (num) {
+    case 1: {                           /* sys_print */
+        const char *s = (const char *)(uintptr_t)a0;
+        if (!s) return (uint64_t)-1;
+        serial_puts("[app] ");
+        /* Bounded: the string comes from the app, and an unterminated one
+         * would otherwise walk off the end of its window. */
+        for (uint32_t i = 0; i < 4096 && s[i]; i++) serial_putc(s[i]);
+        serial_putc('\n');
+        return 0;
+    }
+    case 2: {                           /* sys_draw_pixel */
+        uint32_t x = (uint32_t)a0, y = (uint32_t)a1;
+        if (x >= APP_CANVAS_W || y >= APP_CANVAS_H) return 0;
+        uint32_t px = app_canvas_x + x, py = app_canvas_y + y;
+        if (px >= app_screen_w || py >= app_screen_h) return 0;
+        backbuf[py * app_screen_w + px] = (uint32_t)a2;
+        return 0;
+    }
+    case 3: {                           /* sys_get_mouse */
+        int32_t *out = (int32_t *)(uintptr_t)a0;
+        if (!out) return (uint64_t)-1;
+        out[0] = mouse_x; out[1] = mouse_y;
+        out[2] = (int32_t)mouse_buttons; out[3] = 0;
+        return 0;
+    }
+    case 4:                             /* sys_exit */
+        app_wants_exit = 1;
+        return 0;
+    default:
+        serial_puts("[app] unknown syscall\n");
+        return (uint64_t)-1;
+    }
 }
 
 /*
@@ -261,6 +326,7 @@ void kmain(void) {
      * vector table that has not been installed yet. Printing first is not
      * an option — this has to be the first statement in the kernel.
      */
+    app_region_init();
     mmio_map_init();
 
     serial_puts("\n[socrates/arm64] kmain reached at EL1\n");
@@ -313,14 +379,6 @@ void kmain(void) {
      * animation has played out. */
     ata_init();
 
-    e1000_init(hhdm_request.response ? hhdm_request.response->offset : 0);
-    netstack_init();
-
-    display_boot_animation(vram, w, h, pitch_px);
-    serial_puts("[socrates/arm64] boot animation done\n");
-
-    vtinput_init((int32_t)w, (int32_t)h);
-
     /*
      * Prove the disk end to end rather than trusting the capacity field.
      *
@@ -357,6 +415,80 @@ void kmain(void) {
             serial_puts(")\n");
         }
     }
+
+
+    app_screen_w = w;
+    app_screen_h = h;
+
+    /*
+     * Run the embedded application.
+     *
+     * This is the whole userland path in one call: the container's magic
+     * is checked against this architecture, the image is validated,
+     * copied into an executable window, made visible to the instruction
+     * cache, and entered — and it calls back in through `svc #0` to print
+     * and to draw. Nothing about hello.c changed to get here; only the
+     * header it includes and the linker script it uses.
+     */
+    extern const uint8_t hello_bsd[], hello_bsd_end[];
+    uint64_t hello_len = (uint64_t)(hello_bsd_end - hello_bsd);
+    serial_puts("[socrates/arm64] .bsd: running embedded app, ");
+    serial_put_u64(hello_len);
+    serial_puts(" bytes\n");
+    if (bsd_exec(hello_bsd, hello_len) != 0) {
+        serial_puts("[socrates/arm64] .bsd: refused - ");
+        serial_puts(app_err);
+        serial_puts("\n");
+    } else {
+        serial_puts("[socrates/arm64] .bsd: app returned cleanly\n");
+        /* Count what sys_draw_pixel actually put in the back buffer. The
+         * serial output proves the app ran; this proves its drawing
+         * reached the same memory the compositor presents. */
+        uint32_t gold = 0;
+        for (uint32_t i = 0; i < w * h; i++)
+            if (backbuf[i] == 0xD4AF37u) gold++;
+        serial_puts("[socrates/arm64] .bsd: app drew ");
+        serial_put_u64(gold);
+        serial_puts(" pixels into the back buffer\n");
+    }
+
+    /*
+     * Now hand the loader the x86_64 build of the same program, off the
+     * data volume.
+     *
+     * A loader that runs the right image is only half the guarantee. The
+     * fourth magic byte exists so the wrong one is refused at the first
+     * check rather than entered and executed as instructions it is not —
+     * and the only way to know that works is to try it.
+     */
+    if (exf_vol.mounted) {
+        static uint8_t foreign[8192];
+        exf_dirent_t d;
+        if (exf_lookup("/hello", &d) && !(d.attr & EXF_ATTR_DIR) &&
+            d.size <= sizeof(foreign)) {
+            /* exf_read_file reports the count through its fourth
+             * argument and returns 0 for success — not the byte count. */
+            uint32_t got = 0;
+            if (exf_read_file(&d, foreign, sizeof(foreign), &got) == 0 && got) {
+                serial_puts("[socrates/arm64] .bsd: trying the x86_64 image from disk\n");
+                if (bsd_exec(foreign, (uint64_t)got) != 0) {
+                    serial_puts("[socrates/arm64] .bsd: correctly refused - ");
+                    serial_puts(app_err);
+                    serial_puts("\n");
+                } else {
+                    serial_puts("[socrates/arm64] .bsd: WRONG - ran a foreign image\n");
+                }
+            }
+        }
+    }
+
+    e1000_init(hhdm_request.response ? hhdm_request.response->offset : 0);
+    netstack_init();
+
+    display_boot_animation(vram, w, h, pitch_px);
+    serial_puts("[socrates/arm64] boot animation done\n");
+
+    vtinput_init((int32_t)w, (int32_t)h);
 
     /*
      * Render loop, paced against the counter.

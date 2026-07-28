@@ -306,6 +306,12 @@ static uint64_t mmu_probe_write(uint64_t va) {
  */
 #define MAIR_DEVICE_IDX 2
 
+/* Where loaded applications are mapped, and the physical page backing
+ * that window. Set before mmio_map_init(); zero means no app window. */
+#define APP_WINDOW_VA   0x02000000UL
+#define APP_WINDOW_SIZE (2u * 1024u * 1024u)
+static uint64_t app_region_phys = 0;
+
 static uint64_t dev_l0[512] __attribute__((aligned(4096)));
 static uint64_t dev_l1[512] __attribute__((aligned(4096)));
 static uint64_t dev_l2[512] __attribute__((aligned(4096)));
@@ -354,6 +360,26 @@ static void mmio_map_init(void) {
     for (uint64_t blk = 0x08000000ULL; blk < 0x0C000000ULL; blk += 0x200000ULL) {
         dev_l2[blk >> 21] = blk | PTE_BLOCK | PTE_ATTR(MAIR_DEVICE_IDX) |
                             PTE_AP_RW | PTE_AF | PTE_PXN | PTE_UXN;
+    }
+
+    /*
+     * One 2 MB window at 0x02000000 where loaded applications run.
+     *
+     * .bss cannot host them: Limine maps each program header with the
+     * permissions it declares, so the kernel's data segments are mapped
+     * execute-never and a jump into one faults. Rather than weaken the
+     * kernel's own mapping, this maps a separate window as executable and
+     * leaves everything else alone — the W^X property the .bsd format
+     * exists to preserve is worth more than the two lines it costs here.
+     *
+     * The backing store is still a .bss array; only the view is
+     * different. app_region_phys is filled in by the loader before this
+     * runs, because a mapping needs to know what it points at.
+     */
+    if (app_region_phys) {
+        dev_l2[APP_WINDOW_VA >> 21] =
+            app_region_phys | PTE_BLOCK | PTE_ATTR(0) | PTE_AP_RW |
+            (3ULL << 8) | PTE_AF | PTE_UXN;     /* PXN absent: EL1 may run it */
     }
 
     dev_l1[0] = virt_to_phys(dev_l2) | PTE_TABLE;

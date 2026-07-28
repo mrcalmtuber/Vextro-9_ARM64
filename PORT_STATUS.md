@@ -12,14 +12,16 @@ untouched and unaffected.
 | M2 | Input — keyboard and pointer | done |
 | M3 | Storage — virtio-blk, exFAT | done (PCIe ECAM not needed, see below) |
 | M4 | Network — virtio-net, TCP/IP, HTTP | done (browser UI not wired) |
-| M5 | Userland — aarch64 `.bsd`, `svc #0`, app store | not started |
+| M5 | Userland — aarch64 `.bsd`, `svc #0` | done (Agora UI not wired) |
 | M6 | Model and Wikipedia | not started |
 | M7 | Real hardware — Raspberry Pi | not started |
 
 Boot animation plays, the login screen renders and animates at a locked
 **60 fps**, typing fills the password field, the pointer tracks the host
 cursor absolutely, the 8 GB exFAT volume mounts and lists, and the network
-stack pings its gateway and fetches a real page over HTTP.
+stack pings its gateway and fetches a real page over HTTP. An aarch64
+`.bsd` application loads, runs, and calls back into the kernel through
+`svc #0` — and the x86_64 build of the same program is refused.
 
 Every device — keyboard, tablet, disk, NIC — is virtio over MMIO, sharing
 one virtqueue implementation. That is why three milestones landed without
@@ -104,6 +106,14 @@ be told apart.
 arrives, parses, and is then dropped — indistinguishable from a gateway
 that never answered. Drive the stack's own state, not just its wire
 functions.
+
+**aarch64 caches are not coherent between instruction and data sides.**
+Code written through a data mapping and then executed must be cleaned to
+the point of unification (`dc cvau`) and the instruction side invalidated
+(`ic ivau`) in between. x86 does this in hardware, so the other tree's
+loader has no equivalent and nothing hints that it is needed. Skipping it
+runs whatever was in that memory before — zeroes on the first load, the
+*previous* app on the second.
 
 **Adding a device invalidates `build/efi-vars.fd`.** EDK2 stores the PCI
 path it booted from; a stale entry sends it to the UEFI shell, which looks

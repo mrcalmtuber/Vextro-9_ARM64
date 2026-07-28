@@ -39,10 +39,31 @@
  * so it stays freestanding: stdint.h and nothing else.
  */
 
+/*
+ * The fourth magic byte is the architecture, and always was — it is 0x64
+ * for x86_64 because that is what the format was built for.
+ *
+ * That makes it the right place to say "aarch64" too, rather than adding
+ * a machine field. A new field moves every offset after it and changes
+ * the header size, so an old kernel handed a new image would read the
+ * entry point out of the middle of something else. Spending the byte
+ * that already exists means an x86_64 kernel rejects an aarch64 image
+ * with "bad magic - not a .bsd image" using the check it already has,
+ * and the reverse holds too: a wrong-architecture image fails at the
+ * first test rather than at the first instruction.
+ */
 #define BSD_MAGIC0     'B'
 #define BSD_MAGIC1     'S'
 #define BSD_MAGIC2     'D'
-#define BSD_MAGIC3     0x64        /* x86_64 */
+
+#define BSD_MACHINE_X86_64  0x64
+#define BSD_MACHINE_AARCH64 0xAA
+
+#if defined(__aarch64__)
+#define BSD_MAGIC3     BSD_MACHINE_AARCH64
+#else
+#define BSD_MAGIC3     BSD_MACHINE_X86_64
+#endif
 
 #define BSD_VERSION    1u
 #define BSD_PAGE_SIZE  4096u
