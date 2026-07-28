@@ -29,7 +29,7 @@
 
 /* ---- transport registers ---- */
 
-#define VIRTIO_MMIO_BASE        0x0A000000UL
+#define VIRTIO_MMIO_BASE        virtio_base
 #define VIRTIO_MMIO_STRIDE      0x200UL
 #define VIRTIO_MMIO_COUNT       32
 

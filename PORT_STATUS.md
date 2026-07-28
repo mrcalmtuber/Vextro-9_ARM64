@@ -14,7 +14,7 @@ untouched and unaffected.
 | M4 | Network — virtio-net, TCP/IP, HTTP, browser | done |
 | M5 | Userland — aarch64 `.bsd`, `svc #0` | done |
 | M6 | Model and Wikipedia | done (see the speed caveat) |
-| M7 | Real hardware — Raspberry Pi | not started |
+| M7 | Real hardware | device tree done; Pi drivers not written (see below) |
 
 Boot animation plays, the login screen renders and animates at a locked
 **60 fps**, typing fills the password field, the pointer tracks the host
@@ -118,6 +118,33 @@ Limine's framebuffer is still the fallback, so a ramfb-only machine boots
 to a desktop unchanged. Presenting costs two commands per frame
 (TRANSFER_TO_HOST_2D then RESOURCE_FLUSH) because a virtio-gpu resource
 is not on screen the moment it is written, unlike a linear framebuffer.
+
+## M7: what is done and what is not
+
+**Done, and verified:** `src/fdt.h` parses the flattened device tree, and
+every device address the kernel uses — UART, RTC, GIC distributor and CPU
+interface, virtio transports — now comes from it instead of a constant.
+Checked against qemu's real device tree: all four match what the tree
+says. The qemu `virt` constants remain as defaults, so a machine that
+passes no tree boots exactly as before.
+
+Getting the tree at all needs `-M virt,acpi=off`. Under UEFI, EDK2 chooses
+between ACPI and a device tree and installs only one; by default on `virt`
+it is ACPI, so Limine's DTB request comes back empty. That is not a
+failure — it is what a real board would not do, and the fallback exists
+for exactly this case.
+
+**Not done:** the Raspberry Pi drivers — mailbox framebuffer, SD, USB.
+These are not written, deliberately. There is no Pi here to test against,
+and an untested driver for hardware nobody has run is the thing this
+project's own plan warns against shipping. What the device tree work buys
+is that the rest of the kernel no longer assumes it is on `virt`, which is
+the part that had to happen first either way.
+
+**Also worth knowing for a Pi:** the display already does not need
+firmware. `vtgpu.h` drives virtio-gpu directly and Limine's framebuffer is
+only a fallback, so the display path on hardware without a UEFI GOP is a
+new driver in the same slot rather than a rework.
 
 ## Things that cost a lot to learn
 

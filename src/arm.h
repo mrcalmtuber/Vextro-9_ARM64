@@ -2,6 +2,7 @@
 #define ARM_H
 
 #include <stdint.h>
+#include "fdt.h"
 
 /*
  * The aarch64 machine layer — everything the x86 tree kept in idt.h and
@@ -80,9 +81,24 @@ static inline volatile uint32_t *mmio32(uint64_t phys) {
     return (volatile uint32_t *)(uintptr_t)phys;
 }
 
+/* ---- device addresses ----
+ *
+ * These are qemu `virt` constants, and they are defaults rather than
+ * facts: fdt_probe() replaces each one with what the device tree actually
+ * says before anything uses it. They stay as initialisers because the
+ * console has to work in order to report that device tree parsing failed,
+ * which means the very first serial write happens before any of this can
+ * be known.
+ */
+static uint64_t pl011_base  = 0x09000000UL;
+static uint64_t pl031_base  = 0x09010000UL;
+static uint64_t gicd_base   = 0x08000000UL;
+static uint64_t gicc_base   = 0x08010000UL;
+static uint64_t virtio_base = 0x0A000000UL;
+
 /* ---- PL011 UART ---- */
 
-#define PL011_BASE    0x09000000UL
+#define PL011_BASE    pl011_base
 #define PL011_DR      (*mmio32(PL011_BASE + 0x00))
 #define PL011_FR      (*mmio32(PL011_BASE + 0x18))
 #define PL011_FR_TXFF (1u << 5)
@@ -130,7 +146,7 @@ static void serial_put_hex32(uint32_t v) {
  * Unix timestamp, which is friendlier than the CMOS's BCD registers —
  * no update-in-progress race to worry about, and no BCD conversion.
  */
-#define PL031_BASE 0x09010000UL
+#define PL031_BASE pl031_base
 #define PL031_DR   (*mmio32(PL031_BASE + 0x00))
 
 static uint32_t rtc_epoch(void) { return PL031_DR; }
@@ -199,8 +215,8 @@ static void fpu_init(void) {
 }
 
 /* ---- GICv2, as inherited ---- */
-#define GICD_BASE  0x08000000UL
-#define GICC_BASE  0x08010000UL
+#define GICD_BASE  gicd_base
+#define GICC_BASE  gicc_base
 #define GICD_CTLR  (*mmio32(GICD_BASE + 0x000))
 #define GICC_CTLR  (*mmio32(GICC_BASE + 0x000))
 
@@ -438,6 +454,65 @@ static void machine_reset(void) {
     register uint64_t x0 __asm__("x0") = 0x84000009ULL;   /* SYSTEM_RESET */
     __asm__ volatile("hvc #0" : "+r"(x0) :: "memory");
     for (;;) __asm__ volatile("wfi");     /* not reached */
+}
+
+/*
+ * Replace the built-in addresses with what the device tree says.
+ *
+ * Called after the console works, deliberately. A device tree that cannot
+ * be parsed has to be reported somehow, and the only way to report it is
+ * the UART — so the UART's default address has to be usable before this
+ * runs. On qemu `virt` the defaults are already right and nothing moves;
+ * the point is that on a board they will not be, and this is what makes
+ * that survivable.
+ *
+ * Matched by `compatible` rather than node name. A board is free to call
+ * its UART node anything it likes and frequently does; what it may not do
+ * is claim compatibility with "arm,pl011" for something that is not one.
+ * Matching names works on qemu and quietly fails everywhere else, which
+ * is precisely the class of bug that cannot be found without the board.
+ */
+static void fdt_probe(const void *blob) {
+    serial_puts("[socrates/arm64] fdt: blob ");
+    serial_put_hex64((uint64_t)(uintptr_t)blob);
+    if (blob) {
+        serial_puts(" magic ");
+        serial_put_hex32(fdt_be32((const uint8_t *)blob));
+    }
+    serial_puts("\n");
+    if (!fdt_init(blob)) {
+        serial_puts("[socrates/arm64] fdt: none (keeping virt defaults)\n");
+        return;
+    }
+
+    uint64_t v;
+    if ((v = fdt_reg_base("pl011",  "arm,pl011")))       pl011_base  = v;
+    if ((v = fdt_reg_base("pl031",  "arm,pl031")))       pl031_base  = v;
+    /* GICv2 first, then v3. The two are not interchangeable — v3's second
+     * range is a redistributor, not a CPU interface, and its CPU
+     * interface is reached through system registers instead — so only the
+     * distributor is taken from a v3 tree and the rest is left alone
+     * until something here actually programs one. */
+    uint32_t len = 0;
+    const uint8_t *reg = fdt_find_prop("intc", "arm,cortex-a15-gic", "reg", &len);
+    if (reg && len >= 16) {
+        gicd_base = fdt_be64(reg);
+        if (len >= 32) gicc_base = fdt_be64(reg + 16);
+    } else {
+        reg = fdt_find_prop("intc", "arm,gic-v3", "reg", &len);
+        if (reg && len >= 16) gicd_base = fdt_be64(reg);
+    }
+    if ((v = fdt_reg_base("virtio_mmio", "virtio,mmio"))) virtio_base = v;
+
+    serial_puts("[socrates/arm64] fdt: uart ");
+    serial_put_hex64(pl011_base);
+    serial_puts(" rtc "); serial_put_hex64(pl031_base);
+    serial_puts("\n[socrates/arm64] fdt: gicd ");
+    serial_put_hex64(gicd_base);
+    serial_puts(" gicc "); serial_put_hex64(gicc_base);
+    serial_puts("\n[socrates/arm64] fdt: virtio ");
+    serial_put_hex64(virtio_base);
+    serial_puts("\n");
 }
 
 /*

@@ -72,6 +72,12 @@ static volatile struct limine_hhdm_request hhdm_request = {
     .revision = 0
 };
 
+__attribute__((used, section(".limine_reqs")))
+static volatile struct limine_dtb_request dtb_request = {
+    .id = LIMINE_DTB_REQUEST_ID,
+    .revision = 0
+};
+
 __attribute__((used, section(".limine_reqs_end")))
 static volatile uint64_t end_marker[] = LIMINE_REQUESTS_END_MARKER;
 
@@ -391,6 +397,11 @@ void kmain(void) {
 
     /* Vectors first: from here on a fault says what it was instead of
      * hanging, which matters more the more driver code arrives. */
+    /* Learn where the hardware is before taking it over. Both of the
+     * next two calls write to device registers, and on anything that is
+     * not qemu `virt` the built-in addresses are wrong. */
+    fdt_probe(dtb_request.response ? dtb_request.response->dtb_ptr : 0);
+
     exceptions_init();
     timer_takeover();
     fpu_init();
