@@ -275,34 +275,46 @@ static void uint_to_str(uint32_t val, char *out) {
     out[j] = '\0';
 }
 
-/* ===== CMOS RTC ===== */
-
-static inline uint8_t cmos_read(uint8_t reg) {
-    outb(0x70, reg);
-    return inb(0x71);
-}
-
-static inline uint8_t bcd_to_bin(uint8_t bcd) {
-    return (uint8_t)((bcd >> 4) * 10 + (bcd & 0x0F));
-}
+/* ===== PL031 real-time clock =====
+ *
+ * The x86 build read the CMOS through ports 0x70/0x71: six BCD registers,
+ * a status byte to discover whether they were BCD at all, and an
+ * update-in-progress race to lose. The PL031 is a single register holding
+ * a Unix timestamp, so the work moves from talking to the chip to doing
+ * calendar arithmetic — which at least is arithmetic, and cannot race.
+ */
 
 static void rtc_read(int *hh, int *mm, int *ss, int *day, int *mon, int *yr) {
-    uint8_t statusB = cmos_read(0x0B);
-    int bin = statusB & 0x04;
+    uint32_t t = rtc_epoch();
 
-    uint8_t h = cmos_read(0x04), m = cmos_read(0x02), s = cmos_read(0x00);
-    uint8_t d = cmos_read(0x07), mo = cmos_read(0x08), y = cmos_read(0x09);
+    uint32_t secs_today = t % 86400u;
+    if (ss) *ss = (int)(secs_today % 60u);
+    if (mm) *mm = (int)((secs_today / 60u) % 60u);
+    if (hh) *hh = (int)(secs_today / 3600u);
 
-    if (!bin) {
-        h = bcd_to_bin(h); m = bcd_to_bin(m); s = bcd_to_bin(s);
-        d = bcd_to_bin(d); mo = bcd_to_bin(mo); y = bcd_to_bin(y);
+    /* Days since 1970-01-01, walked a year and then a month at a time.
+     * Cheap enough: the menubar samples this twice a second, not per frame. */
+    uint32_t days = t / 86400u;
+    int y = 1970;
+    for (;;) {
+        int lp = ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0);
+        uint32_t len = lp ? 366u : 365u;
+        if (days < len) break;
+        days -= len;
+        y++;
     }
-    if (hh) *hh = h;
-    if (mm) *mm = m;
-    if (ss) *ss = s;
-    if (day) *day = d;
-    if (mon) *mon = mo;
-    if (yr)  *yr = 2000 + y;
+    int leap = ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0);
+    static const uint8_t mlen[12] = { 31,28,31,30,31,30,31,31,30,31,30,31 };
+    int m = 0;
+    while (m < 11) {
+        uint32_t len = (uint32_t)mlen[m] + ((m == 1 && leap) ? 1u : 0u);
+        if (days < len) break;
+        days -= len;
+        m++;
+    }
+    if (day) *day = (int)days + 1;
+    if (mon) *mon = m + 1;
+    if (yr)  *yr = y;
 }
 
 static const char *month_names[12] = {

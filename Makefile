@@ -45,13 +45,26 @@ FORCE:
 
 all: os.iso
 
-# --- Kernel ---
-build/kernel.o: src/kernel.c $(wildcard src/*.h) build/res.stamp
+# --- Boot animation: video -> raw RGB565 + header ---
+build/boot_anim.raw kernel/include/boot_animation.h: boot.mp4 tools/convert_video.py
+	@mkdir -p build kernel/include
+	python3 tools/convert_video.py boot.mp4 build/boot_anim.raw kernel/include/boot_animation.h
+
+build/boot_animation_data.o: src/boot_animation_data.S build/boot_anim.raw
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c $< -o $@
 
-build/kernel: build/kernel.o linker.ld
-	$(LD) $(LDFLAGS) build/kernel.o -o $@
+# --- Kernel ---
+build/vectors.o: src/vectors.S
+	@mkdir -p build
+	$(CC) $(CFLAGS) -c $< -o $@
+
+build/kernel.o: src/kernel.c $(wildcard src/*.h) kernel/include/boot_animation.h build/res.stamp
+	@mkdir -p build
+	$(CC) $(CFLAGS) -c $< -o $@
+
+build/kernel: build/kernel.o build/vectors.o build/boot_animation_data.o linker.ld
+	$(LD) $(LDFLAGS) build/kernel.o build/vectors.o build/boot_animation_data.o -o $@
 
 # --- ISO root ---
 build/res.stamp: FORCE

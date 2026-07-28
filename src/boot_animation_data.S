@@ -1,4 +1,4 @@
-.section .rodata, "a", @progbits
+.section .rodata, "a", %progbits
 .global boot_anim_data
 .global boot_anim_data_end
 .align 16
