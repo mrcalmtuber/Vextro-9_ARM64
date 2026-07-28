@@ -4,6 +4,9 @@
 #include "arm.h"
 #include "virtio.h"
 #include "vtinput.h"
+#include "ata.h"
+#include "gfx.h"                /* rtc_read: exFAT timestamps entries */
+#include "exfat.h"
 #include "ttf.h"
 #include "login.h"
 #include "boot_animation.h"
@@ -100,6 +103,22 @@ static int      prev_valid = 0;
 
 #define COLOR_BLACK 0x000000u
 #define COLOR_GOLD  0xD4AF37u
+
+/* Report the root directory at boot. Listing real names off a real
+ * volume is the only thing that proves the whole stack — queue, request,
+ * FAT walk, directory-entry decoding — rather than just that a device
+ * answered. */
+static void boot_list_entry(const char *name, uint32_t size, int is_dir) {
+    serial_puts("[socrates/arm64]   ");
+    serial_puts(is_dir ? "dir  " : "file ");
+    serial_puts(name);
+    if (!is_dir) {
+        serial_puts("  ");
+        serial_put_u64(size);
+        serial_puts(" bytes");
+    }
+    serial_puts("\n");
+}
 
 static void halt_forever(void) {
     for (;;) __asm__ volatile("wfi");
@@ -283,10 +302,53 @@ void kmain(void) {
     serial_puts("  timer "); serial_put_u64(timer_hz() / 1000000);
     serial_puts(" MHz\n");
 
+    /* Storage before the animation: it is the slowest thing to come up,
+     * it needs nothing from the display, and bringing it up first means a
+     * failure is reported in the first second rather than after the
+     * animation has played out. */
+    ata_init();
+
     display_boot_animation(vram, w, h, pitch_px);
     serial_puts("[socrates/arm64] boot animation done\n");
 
     vtinput_init((int32_t)w, (int32_t)h);
+
+    /*
+     * Prove the disk end to end rather than trusting the capacity field.
+     *
+     * A device that enumerates and reports a size can still fail every
+     * transfer — a queue the device never really accepted looks identical
+     * from here until something asks it for data. Reading sector zero and
+     * checking for the partition table's signature costs one request and
+     * distinguishes "a disk is attached" from "the disk works".
+     */
+    if (ata_present) {
+        static uint8_t probe[512];
+        if (ata_read(0, 1, probe) == 0) {
+            serial_puts("[socrates/arm64] sector 0 reads, boot signature ");
+            serial_puts((probe[510] == 0x55 && probe[511] == 0xAA)
+                        ? "present\n" : "absent\n");
+        } else {
+            serial_puts("[socrates/arm64] sector 0 READ FAILED\n");
+        }
+
+        exfat_mount();
+        serial_puts("[socrates/arm64] exFAT: ");
+        if (exf_vol.mounted) {
+            serial_puts("mounted, ");
+            serial_put_u64(exf_vol.cluster_bytes);
+            serial_puts("-byte clusters, ");
+            serial_put_u64(exf_total_kb() / 1024);
+            serial_puts(" MiB total, ");
+            serial_put_u64(exf_free_kb() / 1024);
+            serial_puts(" MiB free\n");
+            exf_list("/", boot_list_entry);
+        } else {
+            serial_puts("not mounted (");
+            serial_puts(exf_errstr);
+            serial_puts(")\n");
+        }
+    }
 
     /*
      * Render loop, paced against the counter.

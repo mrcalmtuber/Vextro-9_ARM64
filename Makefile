@@ -143,7 +143,26 @@ QEMU_COMMON := -M virt -m 2048 $(QEMU_CPU) -accel $(ACCEL) \
 	-global virtio-mmio.force-legacy=false \
 	-device virtio-keyboard-device \
 	-device virtio-tablet-device \
+	$(QEMU_DISK) \
 	-cdrom os.iso
+
+# The data disk, if one is present. virtio-blk over the same MMIO
+# transports as input, which is what let the storage milestone skip the
+# PCIe ECAM window entirely — no bus walk, no BAR sizing, no page-table
+# work beyond what milestone 1 already did.
+#
+# Attached read-only by default. This is the 8 GB volume holding wiki.zim
+# and the model, it took a long time to build, and nothing in this port
+# needs to write to it yet. Pass DISK_RO=off deliberately when that
+# changes.
+DISK    ?= ../Socrates BSD 9/disk.img
+DISK_RO ?= on
+ifneq ($(wildcard $(DISK)),)
+QEMU_DISK := -drive if=none,id=d0,format=raw,readonly=$(DISK_RO),file=$(DISK) \
+	-device virtio-blk-device,drive=d0
+else
+QEMU_DISK :=
+endif
 
 # EDK2 keeps its variables in a second flash bank; it wants one the same
 # size as the code image even when empty.

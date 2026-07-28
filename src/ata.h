@@ -2,207 +2,155 @@
 #define ATA_H
 
 #include <stdint.h>
-#include "idt.h"
+#include "virtio.h"
 
 /*
- * ATA PIO driver — primary bus master drive, LBA28, polling only.
- * No IRQs: every transfer spins on the status register, which is fine
- * for a single-tasking kernel and QEMU's instant virtual disk.
- */
-
-#define ATA_IO      0x1F0
-#define ATA_CTRL    0x3F6
-
-#define ATA_REG_DATA     (ATA_IO + 0)
-#define ATA_REG_ERROR    (ATA_IO + 1)
-#define ATA_REG_SECCNT   (ATA_IO + 2)
-#define ATA_REG_LBA0     (ATA_IO + 3)
-#define ATA_REG_LBA1     (ATA_IO + 4)
-#define ATA_REG_LBA2     (ATA_IO + 5)
-#define ATA_REG_DRIVE    (ATA_IO + 6)
-#define ATA_REG_STATUS   (ATA_IO + 7)
-#define ATA_REG_CMD      (ATA_IO + 7)
-
-#define ATA_SR_BSY  0x80
-#define ATA_SR_DRDY 0x40
-#define ATA_SR_DF   0x20
-#define ATA_SR_DRQ  0x08
-#define ATA_SR_ERR  0x01
-
-#define ATA_CMD_READ     0x20
-#define ATA_CMD_WRITE    0x30
-#define ATA_CMD_READ48   0x24
-#define ATA_CMD_WRITE48  0x34
-#define ATA_CMD_FLUSH    0xE7
-#define ATA_CMD_IDENTIFY 0xEC
-
-static inline uint16_t inw(uint16_t port) {
-    uint16_t v;
-    __asm__ volatile("inw %1, %0" : "=a"(v) : "Nd"(port) : "memory");
-    return v;
-}
-
-static inline void outw(uint16_t port, uint16_t val) {
-    __asm__ volatile("outw %0, %1" :: "a"(val), "Nd"(port) : "memory");
-}
-
-static int ata_present = 0;
-static int ata_lba48 = 0;             /* device supports 48-bit addressing */
-static uint64_t ata_sectors = 0;      /* capacity in sectors */
-
-/* ~400 ns settle: four reads of the alternate status register */
-static void ata_io_delay(void) {
-    for (int i = 0; i < 4; i++)
-        (void)inb(ATA_CTRL);
-}
-
-/* Wait for BSY to clear; returns -1 on timeout */
-static int ata_wait_busy(void) {
-    for (int i = 0; i < 1000000; i++) {
-        if (!(inb(ATA_REG_STATUS) & ATA_SR_BSY))
-            return 0;
-    }
-    return -1;
-}
-
-static void ata_put_hex8(uint8_t v) {
-    static const char hx[] = "0123456789ABCDEF";
-    serial_putc(hx[v >> 4]);
-    serial_putc(hx[v & 0xF]);
-}
-
-/* Wait for DRQ (data ready); returns -1 on timeout/error */
-static int ata_wait_drq(void) {
-    uint8_t s = 0;
-    for (int i = 0; i < 1000000; i++) {
-        s = inb(ATA_REG_STATUS);
-        if (s & (ATA_SR_ERR | ATA_SR_DF)) {
-            serial_puts("[ata] DRQ error, status=");
-            ata_put_hex8(s);
-            serial_puts(" err=");
-            ata_put_hex8(inb(ATA_REG_ERROR));
-            serial_putc('\n');
-            return -1;
-        }
-        if (!(s & ATA_SR_BSY) && (s & ATA_SR_DRQ))
-            return 0;
-    }
-    serial_puts("[ata] DRQ timeout, status=");
-    ata_put_hex8(s);
-    serial_putc('\n');
-    return -1;
-}
-
-/* Wait until the device will accept a new command (BSY and DRQ clear) */
-static int ata_cmd_ready(void) {
-    for (int i = 0; i < 1000000; i++) {
-        uint8_t s = inb(ATA_REG_STATUS);
-        if (!(s & (ATA_SR_BSY | ATA_SR_DRQ)))
-            return 0;
-    }
-    serial_puts("[ata] device never became command-ready\n");
-    return -1;
-}
-
-static void ata_select(uint64_t lba) {
-    outb(ATA_REG_DRIVE, (uint8_t)(0xE0 | ((lba >> 24) & 0x0F)));
-    ata_io_delay();
-}
-
-/*
- * Program the task file for one transfer.  LBA28 tops out at 128 GB,
- * which an encyclopedia volume can exceed, so the 48-bit form is used
- * whenever the device advertises it: the high bytes are written first,
- * then the low ones latch over them.
- */
-static void ata_setup(uint64_t lba, uint32_t n, int write) {
-    if (ata_lba48) {
-        outb(ATA_REG_DRIVE, (uint8_t)0xE0);       /* LBA mode, drive 0 */
-        ata_io_delay();
-        outb(ATA_REG_SECCNT, (uint8_t)(n >> 8));
-        outb(ATA_REG_LBA0, (uint8_t)(lba >> 24));
-        outb(ATA_REG_LBA1, (uint8_t)(lba >> 32));
-        outb(ATA_REG_LBA2, (uint8_t)(lba >> 40));
-        outb(ATA_REG_SECCNT, (uint8_t)n);
-        outb(ATA_REG_LBA0, (uint8_t)lba);
-        outb(ATA_REG_LBA1, (uint8_t)(lba >> 8));
-        outb(ATA_REG_LBA2, (uint8_t)(lba >> 16));
-        outb(ATA_REG_CMD, write ? ATA_CMD_WRITE48 : ATA_CMD_READ48);
-    } else {
-        ata_select(lba);
-        outb(ATA_REG_SECCNT, (uint8_t)n);
-        outb(ATA_REG_LBA0, (uint8_t)lba);
-        outb(ATA_REG_LBA1, (uint8_t)(lba >> 8));
-        outb(ATA_REG_LBA2, (uint8_t)(lba >> 16));
-        outb(ATA_REG_CMD, write ? ATA_CMD_WRITE : ATA_CMD_READ);
-    }
-}
-
-/*
- * A whole sector in one string instruction.
+ * The block device, behind the name the filesystems already call.
  *
- * The obvious loop is 256 separate `in` instructions per sector, and on an
- * emulated machine each one is a trap out to the host's device model — the
- * per-access overhead dwarfs the 512 bytes being moved.  `rep insw` is a
- * single instruction the emulator can service as one block, which is worth
- * far more here than it would be on real hardware.
+ * There is no ATA here at all — the disk is virtio-blk. The file keeps
+ * its name and its five entry points because exfat.h and fat32.h are
+ * 3,000 lines of portable code that ask for sectors by LBA and do not
+ * care what answers, and changing them to say something else would be
+ * churn with no reader benefit. The x86 original is kept alongside as
+ * ata_x86.h.ref.
+ *
+ * What that original had to do, and this does not: probe a bus, negotiate
+ * LBA28 versus LBA48, drive a six-register command sequence per transfer,
+ * and spin on a status byte between every 512-byte burst through a 16-bit
+ * port. Here a request is a header, a payload and a status byte handed to
+ * a queue in one go, and the transfer size is whatever was asked for.
+ *
+ * Polled to completion, like everything else in this system. The render
+ * loop is single-threaded and a disk read has nobody to yield to, so
+ * spinning on the used ring is not a compromise — it is the same thing an
+ * interrupt would do, minus the GIC.
  */
-static inline void ata_insw(uint16_t *dst, uint32_t words) {
-    __asm__ volatile("cld; rep insw"
-                     : "+D"(dst), "+c"(words)
-                     : "d"(ATA_REG_DATA)
-                     : "memory");
+
+#define VIRTIO_ID_BLOCK 2
+
+#define VIRTIO_BLK_T_IN    0        /* device -> memory */
+#define VIRTIO_BLK_T_OUT   1        /* memory -> device */
+#define VIRTIO_BLK_T_FLUSH 4
+
+#define VIRTIO_BLK_S_OK    0
+
+struct virtio_blk_req_hdr {
+    uint32_t type;
+    uint32_t reserved;
+    uint64_t sector;
+} __attribute__((packed));
+
+/* The interface the filesystems compile against. */
+static int      ata_present = 0;
+static uint64_t ata_sectors = 0;
+
+static uint64_t vblk_base = 0;
+static virtq_t  vblk_q;
+
+static struct vring_desc  vblk_desc[VQ_SIZE]  __attribute__((aligned(16)));
+static struct vring_avail vblk_avail          __attribute__((aligned(16)));
+static struct vring_used  vblk_used           __attribute__((aligned(16)));
+
+static struct virtio_blk_req_hdr vblk_hdr __attribute__((aligned(16)));
+static volatile uint8_t          vblk_status __attribute__((aligned(16)));
+
+/*
+ * A bounce buffer, and a deliberate one.
+ *
+ * The device is given physical addresses, so any buffer handed to it must
+ * be physically contiguous for its whole length. Kernel buffers are
+ * virtually contiguous and usually physically contiguous too — Limine
+ * loads each segment as one block — but "usually" is the wrong standard
+ * for a disk: a request that straddles a discontinuity would read the
+ * right number of sectors into the wrong memory, silently, and show up
+ * much later as a corrupt file rather than an I/O error.
+ *
+ * 64 KB covers the largest read anything here issues (exfat's 32-sector
+ * read-ahead is 16 KB) in one trip, and larger transfers are simply
+ * chunked. The copy costs far less than the transfer it protects.
+ */
+#define VBLK_BOUNCE_SECTORS 128
+static uint8_t vblk_bounce[VBLK_BOUNCE_SECTORS * 512] __attribute__((aligned(4096)));
+
+static void vblk_memcpy(void *d, const void *s, uint32_t n) {
+    uint8_t *p = d; const uint8_t *q = s;
+    while (n--) *p++ = *q++;
 }
 
-static inline void ata_outsw(const uint16_t *src, uint32_t words) {
-    __asm__ volatile("cld; rep outsw"
-                     : "+S"(src), "+c"(words)
-                     : "d"(ATA_REG_DATA)
-                     : "memory");
+/*
+ * One request, start to finish.
+ *
+ * The three descriptors are the shape every virtio-blk request takes: a
+ * header the device reads, a payload it reads or writes depending on the
+ * direction, and a status byte it always writes. Head index 0 every time
+ * is safe only because this waits for completion before returning — with
+ * a single request in flight the ring never has anything to collide with.
+ */
+static int vblk_request(uint32_t type, uint64_t sector,
+                        void *data, uint32_t bytes, int device_writes) {
+    if (!ata_present) return -1;
+
+    vblk_hdr.type     = type;
+    vblk_hdr.reserved = 0;
+    vblk_hdr.sector   = sector;
+    vblk_status       = 0xFF;
+
+    uint64_t p_hdr = virt_to_phys(&vblk_hdr);
+    uint64_t p_st  = virt_to_phys((void *)&vblk_status);
+    uint64_t p_dat = bytes ? virt_to_phys(data) : 0;
+    if (!p_hdr || !p_st || (bytes && !p_dat)) return -1;
+
+    vq_buf_t bufs[3];
+    int n = 0;
+    bufs[n].phys = p_hdr; bufs[n].len = sizeof(vblk_hdr);
+    bufs[n].device_writes = 0; n++;
+    if (bytes) {
+        bufs[n].phys = p_dat; bufs[n].len = bytes;
+        bufs[n].device_writes = device_writes; n++;
+    }
+    bufs[n].phys = p_st; bufs[n].len = 1;
+    bufs[n].device_writes = 1; n++;
+
+    virtq_offer_chain(vblk_base, 0, &vblk_q, 0, bufs, n);
+
+    /* Bounded so a device that never answers costs a stalled frame rather
+     * than a hung machine with nothing on screen to explain it. */
+    uint64_t deadline = timer_count() + timer_hz() * 5;
+    while (!virtq_has_used(&vblk_q)) {
+        if (timer_count() > deadline) return -1;
+    }
+    virtq_take(&vblk_q);
+
+    uint32_t st = vio_rd(vblk_base, VIO_INT_STATUS);
+    if (st) vio_wr(vblk_base, VIO_INT_ACK, st);
+
+    DMB();
+    return vblk_status == VIRTIO_BLK_S_OK ? 0 : -1;
 }
 
 static int ata_read(uint64_t lba, uint32_t count, void *buf) {
-    if (!ata_present) return -1;
-    uint16_t *p = (uint16_t *)buf;
-    while (count > 0) {
-        uint32_t n = count > 255 ? 255 : count;
-        if (ata_cmd_ready() != 0) return -1;
-        ata_setup(lba, n, 0);
-        for (uint32_t s = 0; s < n; s++) {
-            if (ata_wait_drq() != 0) return -1;
-            ata_insw(p, 256);
-            p += 256;
-        }
-        lba += n;
+    uint8_t *out = buf;
+    while (count) {
+        uint32_t n = count > VBLK_BOUNCE_SECTORS ? VBLK_BOUNCE_SECTORS : count;
+        if (vblk_request(VIRTIO_BLK_T_IN, lba, vblk_bounce, n * 512, 1) != 0)
+            return -1;
+        vblk_memcpy(out, vblk_bounce, n * 512);
+        out   += n * 512;
+        lba   += n;
         count -= n;
     }
     return 0;
 }
 
 static int ata_write(uint64_t lba, uint32_t count, const void *buf) {
-    if (!ata_present) return -1;
-    const uint16_t *p = (const uint16_t *)buf;
-    while (count > 0) {
-        uint32_t n = count > 255 ? 255 : count;
-        if (ata_cmd_ready() != 0) return -1;
-        ata_setup(lba, n, 1);
-        for (uint32_t s = 0; s < n; s++) {
-            if (ata_wait_drq() != 0) return -1;
-            ata_outsw(p, 256);
-            p += 256;
-            /* the device goes busy while it commits the sector — wait it
-             * out, or the next command gets silently swallowed */
-            ata_io_delay();
-            if (ata_wait_busy() != 0) return -1;
-            uint8_t st = inb(ATA_REG_STATUS);
-            if (st & (ATA_SR_ERR | ATA_SR_DF)) {
-                serial_puts("[ata] write error, status=");
-                ata_put_hex8(st);
-                serial_putc('\n');
-                return -1;
-            }
-        }
-        lba += n;
+    const uint8_t *in = buf;
+    while (count) {
+        uint32_t n = count > VBLK_BOUNCE_SECTORS ? VBLK_BOUNCE_SECTORS : count;
+        vblk_memcpy(vblk_bounce, in, n * 512);
+        if (vblk_request(VIRTIO_BLK_T_OUT, lba, vblk_bounce, n * 512, 0) != 0)
+            return -1;
+        in    += n * 512;
+        lba   += n;
         count -= n;
     }
     return 0;
@@ -210,66 +158,39 @@ static int ata_write(uint64_t lba, uint32_t count, const void *buf) {
 
 static int ata_flush(void) {
     if (!ata_present) return -1;
-    outb(ATA_REG_DRIVE, 0xE0);
-    ata_io_delay();
-    outb(ATA_REG_CMD, ATA_CMD_FLUSH);
-    return ata_wait_busy();
+    return vblk_request(VIRTIO_BLK_T_FLUSH, 0, 0, 0, 0);
 }
 
 static void ata_init(void) {
-    /* floating bus = no controller at all */
-    if (inb(ATA_REG_STATUS) == 0xFF) {
-        serial_puts("[ata] no controller (bus floats)\n");
-        return;
-    }
+    ata_present = 0;
+    ata_sectors = 0;
 
-    outb(ATA_REG_DRIVE, 0xA0);            /* select master, CHS mode bit */
-    ata_io_delay();
-    outb(ATA_REG_SECCNT, 0);
-    outb(ATA_REG_LBA0, 0);
-    outb(ATA_REG_LBA1, 0);
-    outb(ATA_REG_LBA2, 0);
-    outb(ATA_REG_CMD, ATA_CMD_IDENTIFY);
-    ata_io_delay();
+    vblk_base = virtio_find(VIRTIO_ID_BLOCK, 0);
+    if (!vblk_base) {
+        serial_puts("[socrates/arm64] virtio-blk: no device\n");
+        return;
+    }
+    if (!virtio_begin(vblk_base)) {
+        serial_puts("[socrates/arm64] virtio-blk: feature negotiation refused\n");
+        return;
+    }
+    if (!virtq_setup(vblk_base, 0, &vblk_q, vblk_desc, &vblk_avail, &vblk_used)) {
+        serial_puts("[socrates/arm64] virtio-blk: queue 0 would not start\n");
+        return;
+    }
+    virtio_ready(vblk_base);
 
-    uint8_t status = inb(ATA_REG_STATUS);
-    if (status == 0) {
-        serial_puts("[ata] no drive on primary master\n");
-        return;
-    }
-    if (ata_wait_busy() != 0) {
-        serial_puts("[ata] drive stuck busy\n");
-        return;
-    }
-    /* ATAPI devices set the signature registers non-zero */
-    if (inb(ATA_REG_LBA1) != 0 || inb(ATA_REG_LBA2) != 0) {
-        serial_puts("[ata] primary master is ATAPI - skipping\n");
-        return;
-    }
-    if (ata_wait_drq() != 0) {
-        serial_puts("[ata] IDENTIFY failed\n");
-        return;
-    }
-
-    uint16_t ident[256];
-    for (int i = 0; i < 256; i++)
-        ident[i] = inw(ATA_REG_DATA);
-
-    /* word 83 bit 10 announces 48-bit addressing; words 100..103 then
-     * hold the real capacity, which LBA28's 32-bit field cannot express */
-    ata_lba48 = (ident[83] & (1 << 10)) ? 1 : 0;
-    if (ata_lba48) {
-        ata_sectors = (uint64_t)ident[100] | ((uint64_t)ident[101] << 16) |
-                      ((uint64_t)ident[102] << 32) | ((uint64_t)ident[103] << 48);
-        if (ata_sectors == 0) ata_lba48 = 0;
-    }
-    if (!ata_lba48)
-        ata_sectors = (uint32_t)ident[60] | ((uint32_t)ident[61] << 16);
+    /* Capacity is the first field of config space, in 512-byte sectors. */
+    uint32_t lo = *mmio32(vblk_base + VIO_CONFIG + 0);
+    uint32_t hi = *mmio32(vblk_base + VIO_CONFIG + 4);
+    ata_sectors = ((uint64_t)hi << 32) | lo;
     ata_present = 1;
 
-    serial_puts("[ata] primary master: ");
-    serial_put_dec((uint16_t)(ata_sectors / 2048));
-    serial_puts(ata_lba48 ? " MB (LBA48)\n" : " MB (LBA28)\n");
+    serial_puts("[socrates/arm64] virtio-blk: ");
+    serial_put_u64(ata_sectors);
+    serial_puts(" sectors (");
+    serial_put_u64(ata_sectors / 2048);
+    serial_puts(" MiB)\n");
 }
 
 #endif /* ATA_H */

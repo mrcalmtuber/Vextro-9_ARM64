@@ -24,6 +24,8 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIRMWARE = "/opt/homebrew/share/qemu/edk2-aarch64-code.fd"
+# Read-only: this is the volume with wiki.zim and the model on it.
+DISK = os.path.join(ROOT, "..", "Socrates BSD 9", "disk.img")
 QMP_PORT = 4483
 
 BOOT_WAIT = float(sys.argv[1]) if len(sys.argv) > 1 else 300.0
@@ -36,6 +38,10 @@ proc = subprocess.Popen([
     "-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={FIRMWARE}",
     "-drive", f"if=pflash,format=raw,unit=1,file={ROOT}/build/efi-vars.fd",
     "-device", "ramfb",
+] + ([
+    "-drive", f"if=none,id=d0,format=raw,readonly=on,file={DISK}",
+    "-device", "virtio-blk-device,drive=d0",
+] if os.path.exists(DISK) else []) + [
     "-global", "virtio-mmio.force-legacy=false",
     "-device", "virtio-keyboard-device",
     "-device", "virtio-tablet-device",

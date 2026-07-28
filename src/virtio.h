@@ -274,6 +274,41 @@ static void virtq_offer(uint64_t base, uint32_t qidx, virtq_t *q,
     vio_wr(base, VIO_QUEUE_NOTIFY, qidx);
 }
 
+/*
+ * Offer a chain of buffers as one request.
+ *
+ * Block devices need this and input devices do not: a read is a header
+ * the device reads, a payload it writes, and a status byte it writes,
+ * and the three must arrive as a single unit with one head index. The
+ * descriptors are linked through `next` and only the head goes into the
+ * available ring — publishing them separately would present three
+ * unrelated requests, none of them well-formed.
+ */
+typedef struct {
+    uint64_t phys;
+    uint32_t len;
+    int      device_writes;
+} vq_buf_t;
+
+static void virtq_offer_chain(uint64_t base, uint32_t qidx, virtq_t *q,
+                              uint16_t head, const vq_buf_t *bufs, int n) {
+    for (int i = 0; i < n; i++) {
+        uint16_t slot = (uint16_t)(head + i);
+        q->desc[slot].addr  = bufs[i].phys;
+        q->desc[slot].len   = bufs[i].len;
+        q->desc[slot].flags = (uint16_t)
+            ((bufs[i].device_writes ? VRING_DESC_F_WRITE : 0) |
+             (i + 1 < n ? VRING_DESC_F_NEXT : 0));
+        q->desc[slot].next  = (uint16_t)(head + i + 1);
+    }
+
+    q->avail->ring[q->avail->idx % q->qsize] = head;
+    DSB();
+    q->avail->idx = (uint16_t)(q->avail->idx + 1);
+    DSB();
+    vio_wr(base, VIO_QUEUE_NOTIFY, qidx);
+}
+
 /* Has the device returned anything? */
 static inline int virtq_has_used(virtq_t *q) {
     DMB();
