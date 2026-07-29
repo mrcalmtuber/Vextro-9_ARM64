@@ -1609,7 +1609,7 @@ static void term_banner(void) {
     if (term_banner_done) return;
     term_banner_done = 1;
     term_print_c("Socrates BSD 9.0 ", 1);
-    term_print_c("(x86_64 bare metal)\n", 3);
+    term_print_c("(aarch64 bare metal)\n", 3);
     if (fs_writable()) {
         char nb[16];
         term_print_c(fs_name(), 3);

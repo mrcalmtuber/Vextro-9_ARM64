@@ -1,251 +1,351 @@
-# Socrates BSD 9 — ARM64
+<h1 align="center">Socrates BSD 9 — ARM64</h1>
 
-A bare-metal **aarch64** operating system built from scratch — custom kernel, TrueType font rasterizer, window manager, TCP/IP stack, web browser, language model, offline Wikipedia, boot animation and desktop UI, all without a libc or external OS dependencies.
+<p align="center">
+  <b>The same operating system, on a different architecture.</b><br>
+  This page is about the <i>difference</i>.
+</p>
 
-This is a standalone port of [Socrates BSD 9](https://github.com/mrcalmtuber/socrates-bsd-9), which targets x86_64. The two repositories are independent: the x86_64 tree is untouched and continues to work.
+<p align="center">
+  <img alt="aarch64" src="https://img.shields.io/badge/arch-aarch64-1f2430?style=flat-square">
+  <img alt="hvf" src="https://img.shields.io/badge/accel-hvf%20%C2%B7%2060%20fps-d4af37?style=flat-square">
+  <img alt="virtio" src="https://img.shields.io/badge/devices-virtio-1f2430?style=flat-square">
+  <img alt="pi" src="https://img.shields.io/badge/board-Raspberry%20Pi%204-1f2430?style=flat-square">
+  <a href="../../releases"><img alt="releases" src="https://img.shields.io/badge/download-ISO-d4af37?style=flat-square"></a>
+</p>
 
-**Two thirds of the codebase came across unchanged.** The compression, filesystem, font, archive, browser and inference code was written integer-only and reads every multi-byte value one byte at a time, so there was not a single unaligned cast or endianness assumption to fix. What had to be written was the machine layer — and most of that turned out to be *deletion*, because on this machine every device speaks virtio.
+<p align="center">
+  <img src="docs/desktop.png" width="88%" alt="The desktop, running under hardware virtualisation on Apple silicon">
+</p>
 
-### What replaced what
+> **What this OS actually *does*** — the windowed desktop, a browser on its
+> own TCP/IP stack, offline Wikipedia, a transformer language model, an app
+> store — is documented in the
+> **[x86_64 repository](https://github.com/mrcalmtuber/socrates-bsd-9)**.
+> All of it is here too, and all of it works. This page is about the
+> machine layer underneath, because that is the only part that differs.
+
+---
+
+## Why port it at all
+
+On an Apple silicon Mac, `qemu-system-x86_64` is a software emulator.
+`qemu-system-aarch64` is not — it has `hvf`, and the guest's instructions
+*are* the host's instructions.
+
+That is not a marginal difference:
+
+| Same measurement, each accelerator | tcg | hvf |
+|---|---:|---:|
+| Prompt evaluation to first token | 41,374 ms | **3,359 ms** |
+| 397 MB of model weights resident | 1,079 ms | **426 ms** |
+| Boot to kernel | ~200 s | **~5 s** |
+
+It is the gap between a language model that answers at roughly a minute per
+token and one that answers, and between a desktop that repaints three times
+a second under load and one that holds a locked **60 fps**. The port is what
+makes the ambitious parts of this project usable rather than merely
+demonstrable.
+
+Which is best shown by doing it. A 0.5B-parameter Qwen2 loaded off the
+volume, its GGUF parsed, its five quantisation formats dequantised, and the
+transformer run one token at a time — on a kernel with no libc:
+
+<p align="center">
+  <img src="docs/gguf.png" width="88%" alt="Parsing the GGUF and tokenising">
+</p>
+
+<p align="center">
+  <img src="docs/llm.png" width="88%" alt="The forward pass predicting Paris">
+</p>
+
+Watch the prediction sharpen as context arrives — `The` → ` following`,
+`The capital` → ` city`, `The capital of France` → ` is`, and then
+**` Paris`**. That is the real forward pass, not a lookup: 24 layers, 14
+query heads over 2 key/value heads, a 151,936-token vocabulary, and 373 MB
+of weights resident.
+
+<p align="center">
+  <img src="docs/terminal.png" width="88%" alt="df, net and mem showing the virtio backends">
+</p>
+
+`df` and `net` above are the dispatch layers this port added: the same
+filesystem and the same network stack, over virtio here and over a Pi's SD
+card and GENET on hardware.
+
+---
+
+## What actually had to change
+
+**Two thirds of the codebase came across untouched.** The compression,
+filesystem, font, archive, browser and inference code was written
+integer-only and reads every multi-byte value one byte at a time, so there
+was not a single unaligned cast or endianness assumption to fix.
+
+What had to be written was the machine layer — and a surprising amount of
+*that* turned out to be deletion, because on this machine every device
+speaks virtio.
 
 | Concern | x86_64 | ARM64 |
 |---|---|---|
-| Boot | Limine (BIOS + UEFI) | Limine (UEFI only), base revision 6 |
-| Interrupts | 8259 PIC, 256-entry IDT | `VBAR_EL1`, 16 x 128-byte code slots |
-| Timer | PIT 8254 + IRQ0 | Architected generic timer, no interrupt at all |
-| Serial | COM1 @ 0x3F8 | PL011 @ 0x09000000 |
+| Boot | Limine, BIOS + UEFI | Limine, UEFI only, base revision 6 |
+| Interrupts | 8259 PIC, 256-entry IDT | `VBAR_EL1`, 16 × 128-byte code slots |
+| Timer | PIT 8254 + IRQ0 | Architected generic timer, **no interrupt at all** |
+| Serial | COM1 @ 0x3F8 | PL011 |
 | RTC | CMOS ports 0x70/0x71 | PL031 |
 | Keyboard | PS/2 controller + ISR | virtio-input |
 | Pointer | PS/2 + VMware backdoor for absolute | virtio-input tablet — **absolute natively** |
-| Storage | ATA PIO, LBA48 | virtio-blk |
-| Network | Intel E1000 | virtio-net |
-| Display | Limine framebuffer | **virtio-gpu, driven by the kernel** |
+| Storage | ATA PIO / AHCI / NVMe | virtio-blk, or a Pi's SD card |
+| Network | Intel e1000 | virtio-net, or a Pi 4's GENET |
+| Display | Firmware framebuffer | **virtio-gpu, driven by the kernel** |
 | Syscalls | `int $0x80` | `svc #0` |
-| Reboot / power off | PS/2 reset pulse, ACPI port pokes | PSCI `SYSTEM_RESET` / `SYSTEM_OFF` |
-| GPU accel | Intel Gen9 blitter | dropped — no counterpart on this machine |
+| Reset / power off | PS/2 reset pulse, ACPI port pokes | PSCI `SYSTEM_RESET` / `SYSTEM_OFF` |
+| GPU acceleration | Intel Gen9 blitter | dropped — no counterpart here |
 | Audio | AC'97 | dropped |
 
-`vmmouse.h` and the PS/2 packet-length negotiation are **deleted, not ported**: the virtio tablet reports absolute positions, so there is nothing to calibrate and no capture to escape from.
+`vmmouse.h` and the PS/2 packet-length negotiation are **deleted, not
+ported**. The virtio tablet reports absolute positions natively, so there is
+nothing to calibrate and no capture to escape from — an entire driver and
+its protocol quirks stop being necessary.
 
-Five virtio devices — keyboard, tablet, disk, network, GPU — share one virtqueue implementation. That is why the PCIe ECAM window the port plan budgeted for was never needed: everything binds to the `virt` machine's MMIO transports.
+Five virtio devices — keyboard, tablet, disk, network, GPU — share one
+virtqueue implementation. That is why the PCIe ECAM window the port plan
+budgeted for was never needed at all.
 
-### Hardware discovery
-
-The kernel reads the flattened device tree, so every device address comes from the firmware rather than from a constant. Devices are matched by `compatible` alone, never by node name — a Raspberry Pi's UART node is `serial@7e201000` and its interrupt controller is `interrupt-controller@40041000`, and neither string should have to appear in a kernel. The qemu `virt` addresses remain as fallbacks for machines that pass no tree.
-
-Two things the parser has to get right that only show up off qemu. **Cell counts are per-node**: `reg` widths come from the parent's `#address-cells`, which is the 64-bit default on `virt` and one cell under a Pi's `soc`. And **bus addresses are not CPU addresses**: a Pi describes its peripherals at `0x7e000000` because that is what the VideoCore sees, while the ARM core reaches the same registers at `0xfe000000`. The `ranges` property is the translation, and ignoring it programs a device that is not there.
-
-`make test` runs the parser on the host against the `bcm2711-rpi-4-b.dtb` the Raspberry Pi firmware actually ships and against a blob dumped from qemu, checking seventeen addresses worked through `ranges` by hand.
-
-The memory map follows from the same source: `mmio_map_init()` classifies each gigabyte from what the firmware reports as backed and what the tree says holds registers, mapping RAM as Normal, devices as Device, and everything else **not at all**.
-
-### Raspberry Pi
-
-Written, and **not yet run on hardware** — there is no Pi here to test against, and the source says so where it matters:
-
-- **`src/mbox.h`** — the VideoCore property mailbox. A Pi is a VideoCore computer with an ARM core attached: the firmware owns the clocks, the power rails and the display, so there is no register that sets the SD clock, only a message asking for it
-- **`src/pifb.h`** — a framebuffer straight from the firmware, eight tags in one message; the display path that needs no UEFI graphics protocol at all
-- **`src/emmc.h`** — the SD card, which on a Pi *is* the disk. SDHCI, polled, full CMD0/CMD8/ACMD41/CMD2/CMD3/CMD9/CMD7/ACMD6 bring-up, both CSD versions
-- **`src/genet.h`** — the Pi 4's on-SoC gigabit MAC, with descriptor rings in the controller's own SRAM and explicit cache maintenance for the buffers, since DMA here is not coherent the way x86's is
-
-They sit behind the interfaces everything else already uses: `blk.h` dispatches storage between virtio-blk and the SD card, `e1000.h` dispatches the network between virtio-net and GENET. The two backends never coexist, so the choice is made once at boot.
+The whole port of `src/llm.c`, 1,399 lines of transformer maths, was **one
+line**: a `sqrtss` instruction replaced by `__builtin_sqrtf`.
 
 ---
 
-## Features
+## The machine layer, piece by piece
 
-### Desktop
-- **Window manager** — z-ordered, click-to-focus windows with titlebar drag, close buttons, drop shadows and spawn animations
-- **Menubar** — working Socrates / Apps menus (About, Restart, Shut Down, app launchers), live clock + date, network status indicator
-- **Dock** — pictogram icons with hover tooltips, running indicators, bottom/left/right placement, adjustable size
-- **Wallpaper themes** — five gradient themes with the dragon emblem, switchable live from Settings
-- **Absolute pointer** — the cursor tracks the host's straight away, with no click-to-grab and no capture to escape from. On x86 that needed a second driver talking to a VMware backdoor port, because PS/2 can only report *relative* motion; here the virtio tablet reports positions natively, so the backdoor and the packet-length negotiation are deleted rather than ported
-- **Scroll wheel** — arrives as an ordinary `REL_WHEEL` event, and is routed to whichever window has focus: terminal scrollback, browser pages, store shelves, article lists
-- **Resolution independent** — the desktop lays itself out around whatever the display reports, and windows clamp to the usable area so they fit on any panel. The kernel drives virtio-gpu directly, so it is not limited to the firmware's mode table
+### Exceptions are code, not descriptors
 
-### Filesystem
-- **exFAT** on a virtio-blk disk (`disk.img`) — the same image the x86_64 build uses, byte for byte
-- exFAT rather than FAT32 because **FAT32 caps a single file at 4 GB**; exFAT carries 64-bit sizes, so an offline archive of any size fits. The default volume is 8 GB and **sparse**, costing only the few megabytes actually used
-- Full read/write driver: allocation-bitmap free space, contiguous (`NoFatChain`) *and* chained files, checksummed directory entry sets, free-form UTF-16 names — no more 8.3
-- **`fs_read_range()`** reads a window out of a file, so nothing has to fit in a buffer. `peek <file> <offset> [n]` exposes it from the shell
-- virtio-blk driver behind the same five-function interface the filesystems already called, so `exfat.h` and `fat32.h` compile untouched; MBR partitions are probed, so a FAT32 boot partition can sit beside the exFAT system one
-- One `fs_*` layer decides which filesystem is mounted; no app talks to a driver directly
-- `disk.img` is a standard image: **mount it on your host** (macOS: `hdiutil attach -imagekey diskimage-class=CRawDiskImage disk.img`) to exchange files with the OS — including dropping in a multi-gigabyte archive
-- Login keycode persists on disk (`keycode.sys`) — delete it to re-register
-- A 16 KB read-ahead window and a cached FAT sector: small sequential reads used to cost one drive command per 512 bytes, and walking a fragmented file's cluster chain re-started from its first cluster on every call
+x86 has a table of 256 gate *descriptors*. aarch64 has one 2 KB-aligned
+table of sixteen 128-byte slots holding **actual instructions**. There is no
+`__attribute__((interrupt))` — GCC implements it only for x86 — so the
+save/restore trampoline in `src/vectors.S` is written by hand: a 192-byte
+frame covering x0–x30, `ELR_EL1` and `SPSR_EL1`.
 
-### Terminal
-- Crisp monospace grid rendering (8x8 bitmap font) with a blinking block cursor
-- Command history (Up/Down), line editing (Left/Right/Home/End/Del), 240-line scrollback (PgUp/PgDn)
-- Working directory (`cd` / `pwd`, shown in the prompt) and output redirection: `ls > list.txt`, `echo hi >> notes.txt`
-- Commands: `help` `clear` `ls` `cat` `cd` `pwd` `rm` `mkdir` `cp` `df` `run` `echo` `date` `uptime` `mem` `mouse` `net` `arp` `ping` `dns` `fetch` `store` `img` `peek` `zim` `open` `history` `reboot` `shutdown`
+The port plan called this its highest risk. It turned out to be the
+opposite. Because the trampoline saves everything the AAPCS does not, the C
+handler is reached by an ordinary `bl` and *is* ordinary C — the compiler's
+x86 interrupt prologues needed no counterpart at all.
 
-### Networking
-- **Full TCP/IP stack** — IPv4, ICMP (ping), UDP, DNS resolver, polled TCP client, async HTTP/1.0 client with redirects
-- **virtio-net driver** — sharing the virtqueue layer with input, storage and the GPU. The E1000 driver would have *compiled* unchanged, and been quietly wrong: its descriptor-then-doorbell sequences carry no memory barriers, because x86 orders stores and the code was written where that is free
-- Works against real websites through QEMU user networking (`ping`, `dns`, `fetch`, and the browser)
+A system call is told apart from a fault by **reading a register**:
+`ESR_EL1`'s exception class is `0x15` for SVC, rather than a whole vector
+being dedicated to it.
 
-### Browser
-- Loads real `http://` pages over the in-kernel TCP stack (no TLS — bare metal has no secrets)
-- HTML-to-text renderer: headings, paragraphs, lists, `<pre>`, entities, word wrap
-- **Clickable links**, Back/Reload, editable address bar, scrollbar, status bar with load progress
-- Internal pages: `socrates://home`, `socrates://help`, `socrates://about`, `socrates://file/<name>`
-- Offline encyclopedia articles at `zim://<title>`, with internal links resolved back to archive entries
+### There are no I/O ports
 
-### App Store
-- **Agora** — a working package manager with a storefront: browse a catalog, **Install**, **Open**, **Remove**
-- Installing is a real operation — the payload is validated, copied to `/apps/<id>.bsd` on the system volume and recorded in the registry at `/apps/apps.db`, so **installed apps survive a reboot**
-- Installed apps join the **dock** (after a separator, with their store icon) and the **Apps menu**, and launch straight into their own window
-- Two package sources, one catalog:
-  - the repository seeded on disk at `/store/pkg` (also carried in the initrd, so the storefront works on an ISO-only boot)
-  - a **network repository fetched over the in-kernel TCP/IP stack** — `Refresh` pulls an index of `key:value` blocks, and each payload is downloaded with its own HTTP GET
-- Every package is a **`.bsd` executable** (see below), validated field by field before a byte reaches the disk
-- Ships five apps, all integer-only: **Mandelbrot** (16.16 fixed-point fractal), **Orbit** (five-body Newtonian integrator), **Game of Life** (149×100 torus over a heat map), **Plasma** (sine table built at runtime by a magic-circle oscillator) and **Voronoi** (28-site partition, network-only — it exists purely to exercise the download path)
-- Also driveable from the shell: `store list` `store install <id>` `store remove <id>` `store run <id>` `store refresh` `store repo [url]`
+The `inb`/`outb` pair that drove the PS/2 controller, the PIT, the CMOS and
+PCI configuration space has no counterpart whatsoever. Every device is
+memory-mapped and drivers read and write volatile pointers. Which sounds
+simpler, and is — right up until the next section.
 
-### Apps
-- **Files** — ramdisk explorer; double-click text files to view them in the browser
-- **Goldsmith** — mouse paint app with palette, brush sizes and eraser
-- **Monolith** — live system monitor (uptime, memory, pointer, TCP state, ARP cache)
-- **Matrix** — falling glyph rain demo
-- **hello** — userland ELF64 app rendering into its own window via `int 0x80` syscalls
+### Time comes from the CPU, not a chip
 
-### Graphics
-- Portable base: the firmware (GOP/VESA) linear framebuffer — works on any GPU vendor, any VM
-- **Intel Gen9/9.5 iGPU driver** (Skylake → Comet Lake): maps BAR0 GTTMMADR, programs a private GGTT window, brings up the BCS blitter ring in legacy submission mode, and executes `XY_COLOR_BLT` packets — with a CPU-verified self-test at boot
-- Register/command encodings adapted from the Linux i915 driver; probe-then-bail structure after SerenityOS — display modesetting is deliberately left to firmware
-- If no supported iGPU is present the OS silently stays on the CPU renderer (`gpu` in the terminal shows which path is live; `gpu test` blits to the visible framebuffer on real hardware)
-- **GPU hang capture** (i915 error-state style): when a submission's breadcrumb never lands, the driver latches EIR/ESR, the per-engine IPEHR/IPEIR (the exact command header that broke the pipeline, decoded by name — e.g. a malformed `XY_COLOR_BLT`), ACTHD, INSTDONE, `RING_FAULT_REG` GGTT faults, the HWS page and the ring contents around the parse point — then attempts a `GDRST` blitter-domain engine reset, falling back to CPU rendering after repeated hangs. `gpu error` prints the full report; `gpu decode <hex>` decodes any command dword
+`CNTPCT_EL0` is a monotonic counter in a system register, with a frequency
+the hardware reports in `CNTFRQ_EL0`. The render loop paces itself against
+real elapsed time with **no interrupt controller, no vector and no
+handler**. The x86 side needs the PIT and an ISR to do the same job, and its
+tick count drifts whenever a frame runs long. This does not.
 
-### Wikipedia offline — the ZIM reader
-Browse a complete offline encyclopedia on bare metal.
+### Memory ordering stops being free
 
-- **`src/zim.h`** — reads Kiwix ZIM archives straight off the exFAT volume, a window at a time. Nothing is loaded whole: only one decompressed cluster is held in memory, and consecutive articles usually share it
-- Lookup is a **binary search over the archive's sorted path list** — about twenty reads across 400k entries, and only about twenty-five across a full dump's 19.7 million. It barely slows as the archive grows
-- **`src/zstd.h`** — a complete Zstandard decompressor (FSE/tANS, Huffman, sequence reconstruction with repeat offsets), written from RFC 8878. ZIM has defaulted to zstd since 2021, so nothing opens without it. xz/LZMA2 clusters work too, via `lzma.h`
-- **Wikipedia app** — type a title, get live prefix results with redirects marked; Enter or a click opens the article
-- **Ask it questions** — the bubble in the header switches to a chat panel that retrieves an article and answers from it. The model loads by itself: drop a Qwen2 GGUF at `/qwen2.gguf` and it streams into memory in the background while the desktop stays live, with progress in the header. Nothing to type
-- Articles render through the existing browser at `zim://<title>`, and **internal links are clickable**: relative hrefs, `../A/` namespace prefixes and percent-encoding are all resolved back to archive entries, so you can browse from article to article with Back working
-- `zim open|info|main|ls|find|get` drive the same reader from the shell
+x86's store ordering was doing invisible work. The e1000 driver's
+descriptor-then-doorbell sequences carry no barriers at all, because there
+they cost nothing and are implied. Here every one needs a `dsb` — cheap to
+add, genuinely nasty to debug if missed, because the symptom is a device
+that works under `tcg` and fails under `hvf`.
 
-Verified on a real 937 MB Simple English archive (399,853 entries, 3,711 clusters): lookups land on the same clusters and byte counts in the kernel as in a host-side reference run.
+The `.bsd` loader pays the same tax in a different currency: instruction and
+data caches are not coherent, so freshly written code needs `dc cvau` then
+`ic ivau` before anything can jump to it.
 
-### Compressed images — the `.sci` format
-Full-colour pictures stored compressed and decompressed when opened.
+### `-mgeneral-regs-only`
 
-- **`src/lzma.h`** — a complete LZMA / LZMA2 / xz decompressor: range decoder, the full probability model, the LZMA2 chunk layer and enough of the xz container to walk its blocks. It decodes straight into the caller's buffer and uses that buffer as its dictionary window, so there is no separate 32 MB ring
-- **`src/sci.h`** — the container. Each row gets a PNG-style prediction filter (None/Sub/Up/Average/Paeth, chosen per row by lowest absolute sum), and the filtered plane is one LZMA stream. Header carries dimensions, channels, filter mode, codec and both sizes, and is validated before anything is decoded
-- **`tools/mkimg.py`** — PNG or PPM in, `.sci` out. It decodes PNG itself with Python's own `zlib`, so the build needs no Pillow and no opencv
-- **Photos** — a gallery app: `.sci` files found in `/pics` and `/` down the left, the decoded picture on the right, click to toggle fit / 1:1. The status bar shows the real ratio. Double-clicking a `.sci` in Files opens it here, and `img <file>` works from the shell
+The counterpart of the x86 build's `-mno-sse -mno-80387` pile, and a
+stricter one: it bars the compiler from touching the FP/SIMD registers
+*anywhere* in the kernel, so no handler can quietly acquire a floating-point
+dependency. The inference translation unit is the single exception and is
+built without it.
 
-The two shipped samples land at **623 KB → 12 KB (1%)** for the emblem and **450 KB → 241 KB (53%)** for a deliberately noisy interference field — the latter still smaller than its PNG.
+---
 
-### The `.bsd` executable format
-A custom x86_64 container that every app store package uses, living in `bsdfmt/`.
+## Three bugs that were worth the whole port
 
-- **`bsd_format.h`** — an 80-byte header: 4-byte magic `'B' 'S' 'D' 0x64`, a `uint32_t` version that pads the magic to 8 bytes so no `uint64_t` straddles an alignment boundary, then 64-bit entry point, text offset/size, data offset/size, load addresses, bss size and flags. `bsd_validate()` is a freestanding, overflow-safe checker shared verbatim by the host tools, the kernel loader and the store's download path
-- **`bsd_maker.c`** — packs raw x86_64 machine code (`-t code.bin -d data.bin -b bss`), or repacks a linked ELF64's two `PT_LOAD` segments (`-e prog.elf`), which is how the store's packages are built
-- **`bsd_run.c`** — POSIX loader: one anonymous `mmap()` for the image, copy the segments in, then `mprotect()` the text `PROT_READ|PROT_EXEC` and the data `PROT_READ|PROT_WRITE`. Neither is ever writable and executable at once, so **W^X holds** and the NX bit never fires on the entry jump. The entry address is cast to `long (*)(long)` and called
-- Segments are page aligned and never share a page — otherwise `mprotect()`, which works at page granularity, could not give them different protections. `bsd_run` detects hosts with pages coarser than 4 KB (16 KB on Apple silicon) and refuses rather than silently mapping RWX
-- Images carry no relocations, so a loader may place them anywhere as long as it preserves the text↔data distance
+### Limine maps no device memory
 
-```sh
-cd bsdfmt && make demo      # build the tools, pack two examples, run them
-./bsd_run -n prog.bsd       # map and protect without calling (works on any host)
+It hands over with the MMU on and its own tables installed, covering the
+kernel, RAM and the framebuffer — and nothing else. A hardcoded
+`*(volatile uint32_t *)0x09000000` for the UART is an unmapped access.
+
+The failure does not look like what it is. The fault happens on the **first
+UART write**, which is before `VBAR_EL1` has been set, because setting it
+requires getting far enough to call `exceptions_init()`. So the CPU vectors
+to address zero, executes whatever the firmware left there, and lands in a
+fault loop with a garbage stack pointer. From outside: a machine that is
+powered on, consuming CPU, and completely silent.
+
+Whether it happened at all depended on the CPU model. `-cpu host` left those
+addresses reachable and `-cpu cortex-a72` did not, so the same binary
+printed six lines under one and nothing under the other.
+
+The kernel now builds its own `TTBR0` before its first character of output.
+
+### Normal memory is speculatable
+
+Mapping RAM that is not there is not a harmless over-approximation.
+
+The architecture guarantees that reading backed memory has no side effects —
+which is precisely why the CPU is allowed to fetch from Normal memory
+unasked. Map a range that is **not** backed and that guarantee is void: the
+core eventually speculates into a physical address nothing answers for.
+
+Under emulation this is invisible, because `tcg` does not speculate. On real
+silicon under a hypervisor it is a stage-2 fault on an access with no
+instruction syndrome to decode, and qemu's hvf backend aborts the process
+outright:
+
+```
+Assertion failed: (isv), function hvf_vcpu_exec
 ```
 
-The kernel's loader (`src/desktop.h`) dispatches on magic: `.bsd` for store packages, ELF64 for `hello`, and it rejects anything else.
+It fires about half a second into any guest that is executing instructions,
+never in one parked in `wfi`, and bears no relation to what the code was
+doing — **because the access was never in the code**. Finding it needed a
+spin-only kernel (`-DBAREMIN`) to establish that the fault belonged to this
+project at all before a bisect could even begin.
 
-### Core
-- **Custom TrueType rasterizer** — integer-only engine rendering Comic Neue (OFL) with 8x8 supersampled AA; no floats, no GPU. Baselines and glyph origins are snapped to whole pixels (left fractional, a 13px baseline lands on an exact half-pixel and fringes every letter), and each glyph's coverage mask is cached per size rather than re-rasterized on every frame — which is what makes the finer sampling affordable
-- **Boot animation** — full-color video playback via raw RGB565 frames embedded at link time; any key skips it
-- **Login screen** — first-boot keycode registration (persisted to disk) with melt animation on bad passwords
-- **Machine layer** — `VBAR_EL1` vector table, the architected generic timer (a monotonic system register, so the render loop paces itself with no interrupt controller at all), PL011 console, PL031 RTC, PSCI for reset and power-off
-- **Its own page tables** — Limine hands over with the MMU on and maps the kernel, RAM and the framebuffer, but *no device registers*. The kernel builds a TTBR0 covering exactly the device blocks that exist, before its first line of output
-- **virtio stack** — one MMIO transport and one split virtqueue implementation, shared by keyboard, tablet, disk, network and GPU. No PCIe bus walk, no BAR sizing, no ECAM window
-- **Device tree** — device addresses read from the firmware's FDT, matched by `compatible`, with the qemu `virt` addresses as fallbacks
-- **Syscall interface** — `svc #0` with a save/restore trampoline. AArch64 gives SVC its own exception class in `ESR_EL1`, so a system call is told apart from a fault by reading a register rather than by dedicating a vector to it
-- **Limine bootloader** — UEFI only (ARM has no BIOS), base revision 6
+The mapper now classifies each gigabyte from two sources: what the firmware
+reports as backed, and what the device tree says holds registers. RAM is
+Normal, devices are Device, and anything else is **not mapped** — so a stray
+access takes an ordinary stage-1 fault that prints `ESR` and `FAR` and says
+exactly where it came from.
+
+### A device tree read carelessly gives plausible wrong answers
+
+Three separate versions of the parser looked correct and were not.
+
+**A child's properties are not its parent's.** Match a node and then take
+the next `reg` you see, and the GIC's nested v2m frame overwrites the
+distributor address with its own MSI window — so the kernel programs an MSI
+window believing it is an interrupt controller.
+
+**Cell counts are per-node.** `reg` widths come from the *parent's*
+`#address-cells`: the 64-bit default on qemu `virt`, and **one cell** under
+a Raspberry Pi's `soc`. Read a fixed eight bytes and you get the address
+with the size welded onto the end of it.
+
+**Bus addresses are not CPU addresses.** A Pi describes its peripherals at
+`0x7e000000` because that is what the VideoCore sees; the ARM core reaches
+the identical registers at `0xfe000000`. The `ranges` property is the
+translation, and a Pi 4 has three such buses with different cell counts
+each.
+
+Lookups are by `compatible` alone, never by node name — a Pi's UART node is
+`serial@7e201000` and its interrupt controller is
+`interrupt-controller@40041000`, and neither string should have to appear in
+a kernel.
+
+```sh
+make test
+```
+
+runs the parser **on the host**, against two real blobs: the
+`bcm2711-rpi-4-b.dtb` the Raspberry Pi firmware ships, and one dumped from
+qemu. Nineteen addresses, and the expected values are what `dtc` prints for
+those nodes worked through `ranges` by hand — not this parser's own output
+written down after the fact.
 
 ---
 
-## Demo
+## Raspberry Pi
 
-▶️ **[Watch the boot animation](boot.mp4)** — a full-color RGB565 video decoded and played by the kernel itself at boot (no GPU, no codec library).
+| | |
+|---|---|
+| **`src/mbox.h`** | The VideoCore property mailbox. A Pi is a VideoCore computer with an ARM core attached: the firmware owns the clocks, the power rails and the display. There is no register that sets the SD card clock — there is a *message asking for one* |
+| **`src/pifb.h`** | A framebuffer straight from the firmware, eight tags in one message. The display path that needs no UEFI graphics protocol at all |
+| **`src/emmc.h`** | The SD card, which on a Pi *is* the disk. SDHCI, polled, the full `CMD0`/`CMD8`/`ACMD41`/`CMD2`/`CMD3`/`CMD9`/`CMD7`/`ACMD6` bring-up, both CSD versions for capacity |
+| **`src/genet.h`** | The Pi 4's on-SoC gigabit MAC. Descriptor rings in the controller's own SRAM, buffers in host memory with explicit cache maintenance — DMA here is not coherent the way x86's is |
 
-> Sequence: boot animation → login screen → windowed desktop.
+They sit behind interfaces that already existed: `blk.h` dispatches storage
+between virtio-blk and the SD card, `e1000.h` dispatches the network between
+virtio-net and GENET. The two backends can never coexist — a Pi has no
+virtio and `virt` has no GENET — so the choice is made once at boot.
 
-<!-- Screenshots: drop PNGs in docs/ and embed, e.g. ![desktop](docs/desktop.png) -->
+One detail that would otherwise have looked like broken hardware: the
+framebuffer is mapped **Normal Non-cacheable**, not Device. Device memory
+here means `Device-nGnRnE` — no gathering, no reordering, no early
+acknowledgement — which is exactly right for a control register and turns
+every pixel into its own bus transaction the core waits on. Three quarters
+of a million of them per frame. There was no MAIR index for Normal-NC, so
+the kernel programs one itself, after checking the slot is genuinely unused.
+
+### What is and is not tested
+
+**None of the four drivers has run on a Raspberry Pi.** There is not one
+here, and the source says so where it matters — including which values are
+inference rather than specification.
+
+What *is* verified is everything that decides whether they are reachable:
+the tree parses, the addresses resolve to the right physical numbers, the
+board is identified, and the memory map is built from what the firmware
+reports rather than from constants. `DTB=1 tools/arm_run.py` turns ACPI off
+so EDK2 publishes a device tree, and the kernel boots to the desktop through
+the full discovery path under both `hvf` and `tcg`.
+
+The gap worth naming: `genet.h` asserts a gigabit link rather than
+negotiating one, because it has no MDIO and never talks to the PHY. On a Pi
+4 the PHY negotiates by itself and the MAC-to-PHY link is fixed, so that is
+right in the ordinary case — but against a 100 Mbit switch the two ends
+would disagree, and the symptom would be a link that passes no traffic
+rather than a slow one.
 
 ---
 
-## Requirements
+## Running it
 
-| Tool | Notes |
-|------|-------|
-| `aarch64-elf-gcc` | Cross-compiler targeting bare-metal ELF |
-| `aarch64-elf-ld` | Matching cross-linker |
-| `xorriso` | ISO creation |
-| `python3` + `opencv-python` + `numpy` | Boot animation conversion (only if `boot.mp4` changes) |
-| `qemu-system-aarch64` | Running in a VM |
-| `edk2-aarch64-code.fd` | UEFI firmware — ARM has no BIOS, so the ISO is UEFI-only |
+```sh
+make            # kernel + UEFI ISO
+make run        # qemu, hvf by default
+make test       # the device tree parser, on the host, against real blobs
+```
 
-On macOS, install the cross-toolchain with Homebrew:
+Pre-built ISOs are under [**Releases**](../../releases).
+
+```sh
+python3 tools/arm_run.py 400 hvf     # headless: serial, plus a register
+                                     #   dump if the guest goes quiet
+DTB=1 python3 tools/arm_run.py 90    # with a real device tree
+python3 tools/arm_shot.py 300        # capture a frame
+python3 tools/arm_input_test.py 330  # drive real input through QMP
+```
+
+`make run` picks up `../Socrates BSD 9/disk.img` if present — the same 8 GB
+exFAT volume the x86_64 build uses, byte for byte, carrying `wiki.zim` and
+the model. `DISK=` and `DISK_RO=off` override.
+
+**Run both accelerators.** `hvf` is the point, but `tcg` enforces weaker
+memory ordering than Apple silicon does, and catches the missing barriers
+`hvf` would hide.
+
+`arm_run.py` reads serial over a socket rather than `-serial file:`, because
+a dying qemu never flushes a file chardev — and the lost tail is exactly
+where execution stopped. When the guest goes quiet it asks the CPU for its
+registers, which is what identified the hardest bug in this port.
+
+<details>
+<summary><b>Toolchain and display notes</b></summary>
 
 ```sh
 brew install aarch64-elf-gcc aarch64-elf-binutils xorriso qemu
-pip3 install opencv-python numpy
 ```
 
-The firmware ships with QEMU at `/opt/homebrew/share/qemu/edk2-aarch64-code.fd`.
-
----
-
-## Build
-
-```sh
-make
-```
-
-This will:
-1. Compile the kernel, `llm.c` (the one translation unit allowed FP/SIMD),
-   the exception vectors and the userland `hello` app — linked to aarch64
-   ELF64 and repacked into a `.bsd` image by `bsdfmt/bsd_maker`
-2. Convert `boot.mp4` to raw RGB565 frames and embed them
-3. Assemble the bootable UEFI ISO at `os.iso`
-
-`.bsd` images declare their architecture in the fourth magic byte — `0xAA`
-here, `0x64` on x86_64 — so each kernel refuses the other's binaries at
-the first check rather than executing them as instructions they are not.
-
----
-
-## Run
-
-```sh
-make run
-```
-
-QEMU's `virt` machine with 2 GB of RAM, virtio input, network and GPU, and
-`../Socrates BSD 9/disk.img` attached **read-only** if it exists. Override
-with `DISK=` and `DISK_RO=off`.
-
-### Accelerator
-
-`ACCEL` defaults to `hvf` — the guest runs on the actual CPU, which is the
-entire reason for an ARM64 build. `ACCEL=tcg` still works and is worth
-running occasionally: emulation enforces weaker memory ordering than Apple
-silicon does, so it catches missing barriers that hvf would hide.
-
-The difference, same measurement under each:
-
-| | tcg | hvf |
-|---|---:|---:|
-| Prompt eval to first token | 41,374 ms | **3,359 ms** |
-| 397 MB of weights resident | 1,079 ms | **426 ms** |
-| Boot to kernel | ~200 s | ~5 s |
-
-### Display
+UEFI firmware comes from QEMU's own
+`/opt/homebrew/share/qemu/edk2-aarch64-code.fd`. ARM has no BIOS, so unlike
+the x86 build there is no El Torito BIOS image and no boot-sector install —
+the ISO is UEFI-only.
 
 The kernel drives virtio-gpu itself, so the resolution is whatever the
 device reports rather than whatever the firmware's mode table contains:
@@ -256,84 +356,60 @@ qemu-system-aarch64 -M virt -device virtio-gpu-device,xres=1440,yres=900 ...
 
 Verified at 1440x900 with no `ramfb` attached at all. Limine's framebuffer
 remains a fallback, but EDK2's ramfb driver offers three modes topping out
-at 1024x768 — and asking for more does not degrade to the next one, it
-falls back to 800x600.
+at 1024x768 — and asking for more does not degrade to the next one, it drops
+to 800x600.
 
-### Headless harness
+`.bsd` images declare their architecture in the fourth magic byte — `0xAA`
+here, `0x64` on x86_64 — so each kernel refuses the other's binaries at the
+first check rather than executing them as instructions they are not.
 
-```sh
-python3 tools/arm_run.py 400 tcg      # serial over a socket + register dump
-python3 tools/arm_shot.py 300         # capture a frame
-python3 tools/arm_input_test.py 330   # drive real keyboard/pointer input
-```
-
-`arm_run.py` reads serial over a socket rather than `-serial file:`,
-because a dying qemu never flushes a file chardev and the lost tail is not
-where execution stopped. When the guest goes quiet it asks the CPU for its
-registers, which is what identified the one genuinely hard bug in this
-port.
+</details>
 
 ---
 
-## Project Layout
+## Where the ARM-specific code lives
 
 ```
-src/            Kernel source
-  kernel.c      Entry point, render loop, login flow, syscall stubs
-  desktop.h     Window manager, menubar, dock, wallpaper, ELF loader
-  term.h        Terminal (commands, history, scrollback)
-  browser.h     Browser (HTML renderer, navigation, links)
-  apps.h        Files / Settings / Photos / Wikipedia + RAG chat / About
-  llm.h llm.c   Local transformer inference (the one FP/SIMD translation unit)
-  store.h       Agora app store (catalog, installer, registry, storefront)
-  lzma.h        LZMA / LZMA2 / xz decompressor (images + ZIM clusters)
-  zstd.h        Zstandard decompressor (modern ZIM clusters)
-  zim.h         ZIM archive reader (offline Wikipedia)
-  sci.h         .sci compressed image format + decoder
-  gfx.h         Theme palette + drawing primitives + monospace text
-  netstack.h    IPv4 / ICMP / UDP / DNS / TCP / HTTP
-  exfat.h       exFAT driver (read/write, 64-bit sizes, range reads)
-  fat32.h       FAT32 driver (fallback)
-  ttf.h         TrueType rasterizer
-
-  --- the aarch64 machine layer ---
-  arm.h         System registers, PL011, PL031, generic timer, page
-                tables, PSCI reset/power-off, device-tree probe
-  fdt.h         Flattened device tree parser (match by `compatible`)
-  vectors.S     VBAR_EL1 table + the `svc #0` save/restore trampoline
-  virtio.h      virtio-mmio transport + split virtqueue (shared by all five)
-  vtinput.h     Keyboard + absolute tablet     vtgpu.h  virtio-gpu scanout
+src/
+  arm.h         System registers, PL011, PL031, generic timer, the page
+                tables, PSCI reset/power-off, board identification
+  fdt.h         Flattened device tree: per-node cell counts, `ranges`
+                translation, matching by `compatible`
+  vectors.S     VBAR_EL1 table + the svc #0 save/restore trampoline
+  virtio.h      virtio-mmio transport + split virtqueue, shared by all five
+  vtinput.h     Keyboard + absolute tablet
+  vtgpu.h       virtio-gpu scanout, driven by the kernel
   blk.h         Block layer: virtio-blk or the SD card, one sector view
   ata.h         virtio-blk behind the ATA name the filesystems call
   emmc.h        Raspberry Pi SD card (SDHCI, polled)
   e1000.h       Network dispatch behind the NIC name netstack.h calls
   genet.h       Broadcom GENET v5 — the Pi 4's gigabit MAC
-  mbox.h        VideoCore property mailbox    pifb.h  firmware framebuffer
+  mbox.h        VideoCore property mailbox
+  pifb.h        Firmware framebuffer, via the mailbox
   keyboard.h    Ring buffer + scancode tables (no ISR, no port I/O)
-  igpu.h        Inert: no integrated GPU on this machine
   bsdload.h     .bsd loader — executable window, I-cache maintenance
+  igpu.h        Inert: no integrated GPU on this machine
 
-  *_x86.h.ref   The x86_64 originals, kept for reference
-apps/           Userland app source + seed files for the disk
-  store/        App store packages + packages.txt (repository metadata)
-  pics/         Sample PNGs, converted to .sci at build time
-bsdfmt/         The .bsd executable format
-  bsd_format.h  Header layout + shared validator
-  bsd_maker.c   Builder (raw machine code, or repack an ELF64)
-  bsd_run.c     POSIX loader: mmap + mprotect W^X + call
-  bsd.ld        Linker script: page-separated text and data segments
-tools/          arm_run.py (boot + serial socket + register dump)
-                arm_shot.py (frame capture), arm_input_test.py (QMP input)
-                mkexfat.py, mkfat32.py, video converter, mkimg.py
-limine-binary/  Pre-built Limine bootloader binaries
-Makefile        Top-level build system
+  *_x86.h.ref   The x86_64 originals, kept alongside for comparison
+
+tools/
+  arm_run.py        Boot, serial over a socket, register dump on silence
+  arm_shot.py       Capture a frame through QMP
+  arm_input_test.py Drive real pointer and key events
+  fdt_test.c        The parser, on the host, against real device trees
+  testdata/         A Raspberry Pi 4's blob, and qemu's
 ```
+
+Everything else — `desktop.h`, `browser.h`, `zim.h`, `zstd.h`, `llm.c`,
+`exfat.h`, `ttf.h` — is the portable two thirds, and is described in the
+[x86_64 repository](https://github.com/mrcalmtuber/socrates-bsd-9).
+
+**[PORT_STATUS.md](PORT_STATUS.md)** is the blow-by-blow: every milestone,
+what each one cost, and what the original plan got wrong.
 
 ---
 
 ## Status
-
-Milestones M0-M7 are complete and verified under emulation:
 
 | | Milestone | Verified by |
 |---|---|---|
@@ -342,30 +418,24 @@ Milestones M0-M7 are complete and verified under emulation:
 | M2 | Keyboard + absolute pointer | host `(0.75, 0.70)` arrives as `599,419` |
 | M3 | virtio-blk + exFAT | 8 GB volume mounts; real root listing |
 | M4 | virtio-net + TCP/IP + browser | ICMP 4/4; `HTTP 200`, page renders |
-| M5 | aarch64 `.bsd` + `svc #0` | app runs; x86_64 image refused |
-| M6 | Model + offline Wikipedia | ZIM v6, 399,853 entries; model answers " Paris" |
-| M7 | Device tree | UART/RTC/GIC/virtio all read from the tree |
-
-**One thing is honestly incomplete:**
-
-- **The Raspberry Pi drivers are not written** — mailbox framebuffer, SD,
-  USB. There is no Pi here to test against, and shipping untested drivers
-  for hardware nobody has run is not worth doing. The device tree work is
-  the part that had to come first regardless, and the display already does
-  not depend on firmware.
-
-See `PORT_STATUS.md` for the things that cost the most to find.
+| M5 | aarch64 `.bsd` + `svc #0` | app runs; the x86_64 image is refused |
+| M6 | Model + offline Wikipedia | ZIM v6, 399,853 entries; the model answers |
+| M7 | Device tree + Raspberry Pi | 19 parser checks against real blobs; drivers written, **not run on a Pi** |
 
 ---
 
-## Download
+## The honest cost of a standalone copy
 
-Pre-built ISOs are available under [Releases](../../releases).
+14,710 shared lines will drift. A bug fixed in `zstd.h` or `browser.h` has
+to be fixed twice, by hand. That is the price of the independence this
+repository was asked for, and it is real — but the architecture-specific 9%
+is where nearly all future work happens, so the drift is mostly in stable
+code.
 
 ---
 
 ## License
 
-Source code is released under the [Apache License 2.0](LICENSE).
-Comic Neue font is licensed under the [SIL Open Font License 1.1](assets/OFL.txt).
-Limine bootloader is [BSD 2-Clause](https://github.com/limine-bootloader/limine).
+Source released under the [Apache License 2.0](LICENSE).
+Comic Neue is under the [SIL Open Font License 1.1](assets/OFL.txt).
+Limine is [BSD 2-Clause](https://github.com/limine-bootloader/limine).

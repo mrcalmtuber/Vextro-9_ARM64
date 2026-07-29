@@ -643,13 +643,26 @@ void kmain(void) {
      * a usable range becomes a pointer by adding the offset.
      */
     if (memmap_request.response && hhdm_request.response) {
-        uint64_t best_base = 0, best_len = 0, total = 0;
+        uint64_t best_base = 0, best_len = 0, usable = 0, installed = 0;
         for (uint64_t i = 0; i < memmap_request.response->entry_count; i++) {
             struct limine_memmap_entry *e = memmap_request.response->entries[i];
+
+            /* What the machine has, as `mem` and the system monitor report
+             * it. Reclaimable and kernel ranges count — they are RAM, and
+             * leaving them out would tell a 2 GB machine it has 1.9. */
+            if (e->type == LIMINE_MEMMAP_USABLE ||
+                e->type == LIMINE_MEMMAP_BOOTLOADER_RECLAIMABLE ||
+                e->type == LIMINE_MEMMAP_EXECUTABLE_AND_MODULES)
+                installed += e->length;
+
+            /* What the inference arena may have is a stricter question:
+             * only ranges nothing else is using. */
             if (e->type != LIMINE_MEMMAP_USABLE) continue;
-            total += e->length;
+            usable += e->length;
             if (e->length > best_len) { best_len = e->length; best_base = e->base; }
         }
+        system_total_memory_mb = installed / (1024 * 1024);
+        uint64_t total = usable;
         if (best_len > (16ull << 20)) {
             llm_arena_init((void *)(uintptr_t)(hhdm_request.response->offset
                                                + best_base), best_len);
