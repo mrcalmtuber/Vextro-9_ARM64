@@ -27,6 +27,26 @@ CFLAGS := -O2 -Wall -Wextra -ffreestanding -fno-stack-protector \
 # Limine rejects that, correctly. Since the kernel is loaded at one fixed
 # address either way, saying ET_EXEC outright is clearer than depending on
 # a linker's fallback.
+# --- Rebuild when the compiler flags change ---
+#
+# make compares timestamps, and a flag has none. Without this,
+# `make iso EXTRA=-DSOMETHING` after an ordinary build leaves kernel.o
+# untouched and produces an ISO that does not contain the thing that was
+# asked for, silently.
+#
+# It happens at parse time, before any rule runs, and that placement is
+# the load-bearing part. A recipe that deletes the objects is too late:
+# macOS ships GNU Make 3.81, which stats every target while building its
+# dependency graph and does not look again. It also compares
+# modification times to the whole second, so a stamp rewritten in the
+# same second as the previous build is not "newer" and changes nothing.
+# Deleting before the graph exists sidesteps both.
+BUILD_FLAGS := $(CFLAGS)
+$(shell mkdir -p build; \
+        [ "`cat build/.flags 2>/dev/null`" = "$(BUILD_FLAGS)" ] || \
+        { printf '%s\n' "$(BUILD_FLAGS)" > build/.flags; \
+          rm -f build/kernel.o build/llm.o; })
+
 LDFLAGS := -nostdlib -static -no-pie -z text -T linker.ld
 
 LIMINE := limine-binary

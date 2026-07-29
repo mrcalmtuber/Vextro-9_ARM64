@@ -63,6 +63,12 @@ static void test_pi4(const char *path) {
 
     check("root is bcm2711", fdt_board_is("brcm,bcm2711"), 1);
     check("root is not bcm2837", fdt_board_is("brcm,bcm2837"), 0);
+    /* "simple-bus" is claimed by soc, scb and emmc2bus — and by no root
+     * node anywhere. A board check that searches the whole tree instead
+     * of the root says yes to this, which is how the wrong drivers get
+     * chosen on a machine that merely contains a bus. */
+    check("a bus's compatible is not the board's",
+          fdt_board_is("simple-bus"), 0);
 
     /* soc: ranges 0x7e000000 -> 0xfe000000, one address cell */
     check("pl011 uart", fdt_reg_base(0, "arm,pl011"), 0xfe201000ULL);
@@ -85,6 +91,14 @@ static void test_pi4(const char *path) {
 
     /* Absent hardware must report absent rather than zero-by-accident */
     check("no virtio-mmio", fdt_reg_base(0, "virtio,mmio"), 0);
+
+    /* The raw property lookup the drivers use, on a property that is not
+     * `reg`: the SD controller's interrupt line, three cells of it. */
+    uint32_t len = 0;
+    const uint8_t *irq = fdt_find_prop_at(0, "brcm,bcm2711-emmc2",
+                                         "interrupts", &len, 0);
+    check("emmc2 interrupts present", irq != 0, 1);
+    check("emmc2 interrupts length", len, 12);
     free(blob);
 }
 
@@ -100,6 +114,10 @@ static void test_virt(const char *path) {
     if (!fdt_init(blob)) { printf("  FAIL: not a device tree\n"); failures++; return; }
 
     check("root is not a pi", fdt_board_is("brcm,bcm2711"), 0);
+    check("a device's compatible is not the board's",
+          fdt_board_is("arm,pl011"), 0);
+    /* what the root really claims, as the positive half of the same test */
+    check("root is a qemu virt machine", fdt_board_is("linux,dummy-virt"), 1);
     check("pl011 uart", fdt_reg_base(0, "arm,pl011"), 0x09000000ULL);
     check("pl031 rtc", fdt_reg_base(0, "arm,pl031"), 0x09010000ULL);
     check("gic distributor", fdt_reg_index(0, "arm,cortex-a15-gic", 0, 0), 0x08000000ULL);

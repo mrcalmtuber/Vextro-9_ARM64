@@ -362,11 +362,13 @@ static int genet_init_rings(void) {
              DMA_EN | (1u << (GENET_DEFAULT_Q + DMA_RING_BUF_EN_SHIFT)));
 
     /*
-     * The receive ring is handed to the controller full: every
-     * descriptor already points at a buffer, so the producer index
-     * starts at the ring size and the engine has somewhere to put the
-     * first packet that arrives. Starting it at zero means the first
-     * frame is dropped and, with no interrupt to notice, silently.
+     * Both indices start at zero and stay in step with the hardware's.
+     *
+     * Unlike the virtio rings elsewhere in this kernel, there is nothing
+     * to "post": every receive descriptor already points at a buffer
+     * from the loop above, and the engine fills them in order. The
+     * driver only ever writes the consumer index — the producer index is
+     * the controller's, and reading it is how a frame is noticed.
      */
     genet_rx_index = 0;
     genet_rx_cons  = 0;

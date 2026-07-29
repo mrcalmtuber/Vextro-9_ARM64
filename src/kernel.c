@@ -448,6 +448,7 @@ void kmain(void) {
     fpu_init();
     serial_puts("[socrates/arm64] vectors installed, timer disarmed, FP on\n");
     mmu_report();
+    mmio_report();
 
     CHK(1);
     /*

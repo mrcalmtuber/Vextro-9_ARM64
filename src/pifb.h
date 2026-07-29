@@ -132,13 +132,20 @@ static int pifb_init(uint32_t want_w, uint32_t want_h) {
     /*
      * The framebuffer is carved out of the GPU's share of memory, which
      * is deliberately *not* in the firmware's map of what the ARM may
-     * use — so nothing has mapped it and nothing will unless it is asked
-     * for by name. Registering it as a device region rather than as RAM
-     * is the honest description: it is memory the CPU does not own, and
-     * mapping it Normal-cacheable would leave frames sitting in a
-     * write-back cache the display controller cannot see.
+     * use — so nothing has mapped it, and nothing will unless it is
+     * asked for by name.
+     *
+     * It is registered as REGION_FB rather than as an ordinary device
+     * window, and the distinction is worth the extra enum. Device memory
+     * on this architecture means Device-nGnRnE: no gathering, no
+     * reordering, no early acknowledgement. That is exactly right for a
+     * control register and ruinous for a framebuffer, where it turns
+     * every pixel into its own bus transaction the core waits on — three
+     * quarters of a million of them per frame at this size. REGION_FB
+     * maps Normal Non-cacheable instead: stores gather and reorder
+     * freely, and nothing lands in a cache the display cannot see.
      */
-    mmio_region_add(phys, size);
+    mmio_region_add_kind(phys, size, REGION_FB);
     mmio_map_init();
 
     pifb_addr     = (volatile uint32_t *)(uintptr_t)phys;

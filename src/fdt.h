@@ -338,13 +338,6 @@ static const uint8_t *fdt_find_prop_at(const char *node_name,
     return 0;
 }
 
-static const uint8_t *fdt_find_prop(const char *node_name,
-                                    const char *compatible,
-                                    const char *prop_name,
-                                    uint32_t *out_len) {
-    return fdt_find_prop_at(node_name, compatible, prop_name, out_len, 0);
-}
-
 /*
  * Where a device's registers are, as the CPU must address them.
  *
@@ -379,11 +372,58 @@ static uint64_t fdt_reg_base(const char *node_name, const char *compatible) {
     return fdt_reg_index(node_name, compatible, 0, 0);
 }
 
-/* Does the root node claim compatibility with `what`?  This is how a
- * board is identified: "brcm,bcm2711" is a Raspberry Pi 4 and nothing
- * else, whatever the vendor called the model. */
+/*
+ * Does the *root* node claim compatibility with `what`?
+ *
+ * This is how the board is identified, which makes it the single most
+ * consequential lookup in the kernel: it decides which drivers run at
+ * all. So it reads the root's own `compatible` directly rather than
+ * going through the general search, which matches any node at any depth
+ * and would answer yes for a peripheral that happened to carry the same
+ * string. That distinction currently costs nothing — only a Pi's root
+ * claims exactly "brcm,bcm2711", while its devices claim
+ * "brcm,bcm2711-gpio" and friends — and depending on it would be
+ * depending on an accident.
+ *
+ * The root is the first token in the structure block, and its properties
+ * precede its children, so this needs no walk at all.
+ */
 static int fdt_board_is(const char *what) {
-    return fdt_find_prop(0, what, "compatible", 0) != 0;
+    if (!fdt_blob || !what) return 0;
+
+    const uint8_t *p   = fdt_blob + fdt_struct_off;
+    const uint8_t *end = fdt_blob + fdt_total;
+    if (p + 4 > end || fdt_be32(p) != FDT_BEGIN_NODE) return 0;
+    p += 4;
+
+    uint32_t n = 0;                       /* the root's name is empty */
+    while (p + n < end && p[n]) n++;
+    p += (n + 4) & ~3u;
+
+    while (p + 4 <= end) {
+        uint32_t tok = fdt_be32(p);
+        p += 4;
+        if (tok == FDT_NOP) continue;
+        if (tok != FDT_PROP) break;       /* a child node: properties done */
+
+        if (p + 8 > end) break;
+        uint32_t len     = fdt_be32(p);
+        uint32_t nameoff = fdt_be32(p + 4);
+        const uint8_t *val = p + 8;
+        p = val + ((len + 3) & ~3u);
+
+        if (!fdt_streq(fdt_string(nameoff), "compatible")) continue;
+
+        /* A NUL-separated list; any entry may match. */
+        uint32_t i = 0;
+        while (i < len) {
+            if (fdt_streq((const char *)val + i, what)) return 1;
+            while (i < len && val[i]) i++;
+            i++;
+        }
+        return 0;
+    }
+    return 0;
 }
 
 #endif /* FDT_H */

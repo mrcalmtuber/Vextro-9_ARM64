@@ -350,6 +350,37 @@ static uint64_t mmu_probe_write(uint64_t va) {
  */
 #define MAIR_DEVICE_IDX 2
 
+/*
+ * Index 3, which this kernel programs itself: Normal, Non-cacheable,
+ * inner and outer — the attribute a framebuffer wants.
+ *
+ * Limine leaves 2 through 7 as zero and uses only 0 and 1, so 3 is free.
+ * That is checked rather than assumed: MAIR is a live register and a
+ * mapping already made with index 3 would silently change meaning
+ * underneath it. If the slot is not what it should be, the framebuffer
+ * falls back to Normal write-back — slower to display, since the frame
+ * sits in a cache the scanout hardware cannot see, but not wrong the way
+ * an unexpected attribute change would be.
+ */
+#define MAIR_NC_IDX  3
+#define MAIR_NC_ATTR 0x44ULL          /* Normal, outer NC, inner NC */
+
+static int mair_nc_ready = 0;
+
+static void mair_setup(void) {
+    uint64_t mair = SYSREG_READ(mair_el1);
+    uint64_t cur = (mair >> (8 * MAIR_NC_IDX)) & 0xFF;
+
+    if (cur == MAIR_NC_ATTR) { mair_nc_ready = 1; return; }
+    if (cur != 0x00) { mair_nc_ready = 0; return; }   /* in use: leave it */
+
+    mair |= MAIR_NC_ATTR << (8 * MAIR_NC_IDX);
+    SYSREG_WRITE(mair_el1, mair);
+    DSB();
+    ISB();
+    mair_nc_ready = 1;
+}
+
 /* Where loaded applications are mapped, and the physical page backing
  * that window. Set before mmio_map_init(); zero means no app window. */
 #define APP_WINDOW_VA   0x02000000UL
@@ -392,12 +423,31 @@ static uint64_t virt_to_phys(const void *p) {
 #define MMIO_REGIONS_MAX 10
 #define RAM_REGIONS_MAX  12
 
-typedef struct { uint64_t base, size; } phys_region_t;
+/*
+ * `kind` distinguishes registers from a framebuffer, and the difference
+ * is not cosmetic.
+ *
+ * Device-nGnRnE is the right memory type for a control register: no
+ * gathering, no reordering, no early acknowledgement, because writing one
+ * has a side effect and the order it happens in is the whole point.
+ * Applying that to a framebuffer is a performance catastrophe — every
+ * 32-bit pixel store becomes its own bus transaction that the core waits
+ * on, and a 1024x768 frame is three quarters of a million of them.
+ *
+ * A framebuffer wants the opposite: stores gathered and reordered
+ * freely, since nothing reads it until the frame is finished, but never
+ * held in a cache the display controller cannot see. That is Normal
+ * Non-cacheable, and it is why REGION_FB exists.
+ */
+#define REGION_DEVICE 0
+#define REGION_FB     1
+
+typedef struct { uint64_t base, size; uint8_t kind; } phys_region_t;
 
 static phys_region_t mmio_regions[MMIO_REGIONS_MAX] = {
     /* qemu virt: GIC at 0x08000000, PL011/PL031/fw_cfg at 0x09000000,
      * virtio-mmio transports at 0x0A000000 */
-    { 0x08000000ULL, 0x04000000ULL },
+    { 0x08000000ULL, 0x04000000ULL, REGION_DEVICE },
 };
 static int mmio_region_count = 1;
 
@@ -407,7 +457,7 @@ static int ram_region_count = 0;
 #define MMIO_BLOCK   0x200000ULL          /* 2 MB, the L2 block size */
 #define MMIO_GIGA    0x40000000ULL
 
-static void mmio_region_add(uint64_t base, uint64_t size) {
+static void mmio_region_add_kind(uint64_t base, uint64_t size, uint8_t kind) {
     if (!base && !size) return;
     uint64_t end = (base + size + MMIO_BLOCK - 1) & ~(MMIO_BLOCK - 1);
     base &= ~(MMIO_BLOCK - 1);
@@ -415,12 +465,35 @@ static void mmio_region_add(uint64_t base, uint64_t size) {
 
     for (int i = 0; i < mmio_region_count; i++) {
         uint64_t rend = mmio_regions[i].base + mmio_regions[i].size;
-        if (base >= mmio_regions[i].base && end <= rend) return;   /* covered */
+        if (base >= mmio_regions[i].base && end <= rend &&
+            mmio_regions[i].kind == kind) return;              /* covered */
     }
     if (mmio_region_count >= MMIO_REGIONS_MAX) return;
     mmio_regions[mmio_region_count].base = base;
     mmio_regions[mmio_region_count].size = end - base;
+    mmio_regions[mmio_region_count].kind = kind;
     mmio_region_count++;
+}
+
+static void mmio_region_add(uint64_t base, uint64_t size) {
+    mmio_region_add_kind(base, size, REGION_DEVICE);
+}
+
+/* Which kind of mapping a block wants, or -1 if no region claims it.
+ * A framebuffer wins over a device window if both somehow claim the same
+ * block, because the framebuffer is the one whose performance depends on
+ * the answer. */
+static int mmio_kind_at(uint64_t base, uint64_t size) {
+    int found = -1;
+    uint64_t end = base + size;
+    for (int i = 0; i < mmio_region_count; i++) {
+        if (base < mmio_regions[i].base + mmio_regions[i].size &&
+            end > mmio_regions[i].base) {
+            if (mmio_regions[i].kind == REGION_FB) return REGION_FB;
+            found = REGION_DEVICE;
+        }
+    }
+    return found;
 }
 
 /* Replace the built-in `virt` window entirely — a board that is not virt
@@ -517,9 +590,17 @@ static uint64_t *mmio_l2_alloc(uint64_t gb) {
  * constant is what makes that impossible to get wrong on a machine
  * nobody has tried yet.
  */
+/* How much reported memory the 2 MB granularity had to leave out, so
+ * that conservative rounding is a number somebody can look at rather
+ * than a silent loss. Zero on both machines this has been run on. */
+static uint64_t mmio_ram_dropped = 0;
+
 static void mmio_map_init(void) {
     for (int i = 0; i < 512; i++) { dev_l0[i] = 0; dev_l1[i] = 0; }
     dev_l2_n = 0;
+    mmio_ram_dropped = 0;
+
+    mair_setup();
 
     /* How far up anything of interest reaches. */
     uint64_t top = 0;
@@ -538,6 +619,12 @@ static void mmio_map_init(void) {
                                   PTE_AF | PTE_PXN | PTE_UXN;
     const uint64_t device_flags = PTE_ATTR(MAIR_DEVICE_IDX) | PTE_AP_RW |
                                   PTE_AF | PTE_PXN | PTE_UXN;
+    /* Shareability matters for the framebuffer in a way it does not for
+     * a device register: Normal memory needs it declared, and outer
+     * shareable is what keeps a store visible to another master. */
+    const uint64_t fb_flags = PTE_ATTR(mair_nc_ready ? MAIR_NC_IDX : 0) |
+                              PTE_AP_RW | (2ULL << 8) | PTE_AF |
+                              PTE_PXN | PTE_UXN;
 
     for (uint64_t g = 0; g < ngb; g++) {
         uint64_t gbase = g * MMIO_GIGA;
@@ -563,12 +650,23 @@ static void mmio_map_init(void) {
             uint64_t pa = gbase + b * MMIO_BLOCK;
             /* Device first: where a device tree claims registers, they are
              * registers, whatever a memory map may also say about it. */
-            if (region_overlaps(mmio_regions, mmio_region_count, pa, MMIO_BLOCK))
+            int kind = mmio_kind_at(pa, MMIO_BLOCK);
+            if (kind == REGION_FB)
+                l2[b] = pa | PTE_BLOCK | fb_flags;
+            else if (kind == REGION_DEVICE)
                 l2[b] = pa | PTE_BLOCK | device_flags;
             else if (region_covers(ram_regions, ram_region_count, pa, MMIO_BLOCK))
                 l2[b] = pa | PTE_BLOCK | normal_flags;
-            else
+            else {
+                /* Not fully backed, so not mapped — the conservative
+                 * direction, and the one the hvf abort demands. A block
+                 * that is *partly* RAM loses that part, which is only
+                 * possible where a reported region does not end on a
+                 * 2 MB boundary; counting it makes that visible. */
+                if (region_overlaps(ram_regions, ram_region_count, pa, MMIO_BLOCK))
+                    mmio_ram_dropped += MMIO_BLOCK;
                 l2[b] = 0;
+            }
         }
         dev_l1[g] = virt_to_phys(l2) | PTE_TABLE;
     }
@@ -607,6 +705,31 @@ static void mmio_map_init(void) {
     __asm__ volatile("tlbi vmalle1" ::: "memory");
     DSB();
     ISB();
+}
+
+/*
+ * What the mapper decided, in one line.
+ *
+ * Separate from mmu_report() only because that runs before this file's
+ * state exists. The two numbers are the ones worth seeing: how many
+ * gigabytes needed 2 MB granularity rather than a single block, and how
+ * much reported memory that granularity had to leave out. The second
+ * should be zero, and if it is ever not, it is the first thing to look
+ * at when a machine is mysteriously short of RAM.
+ */
+static void mmio_report(void) {
+    serial_puts("[socrates/arm64] map: ");
+    serial_put_u64((uint64_t)mmio_region_count);
+    serial_puts(" device regions, ");
+    serial_put_u64((uint64_t)dev_l2_n);
+    serial_puts(" split gigabytes, framebuffer type ");
+    serial_puts(mair_nc_ready ? "normal-nc" : "normal-wb (MAIR slot taken)");
+    if (mmio_ram_dropped) {
+        serial_puts(", DROPPED ");
+        serial_put_u64(mmio_ram_dropped / 1024);
+        serial_puts(" KB of reported RAM");
+    }
+    serial_puts("\n");
 }
 
 /*

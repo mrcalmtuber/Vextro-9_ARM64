@@ -194,6 +194,34 @@ left **invalid**. That last part is the point — it is the general form of
 the fix for the hvf abort described below, and it means a Pi's
 peripherals cannot come up mapped as cacheable memory.
 
+### The framebuffer is not device memory
+
+The Pi framebuffer is registered with the mapper so the CPU can reach it
+at all, and the first version registered it as an ordinary device
+window. That would have worked and been unusably slow.
+
+Device memory on this architecture means Device-nGnRnE: no gathering, no
+reordering, no early acknowledgement. That is exactly right for a
+control register, where writing one has a side effect and the order
+matters, and ruinous for a framebuffer, where it turns every pixel into
+its own bus transaction the core waits on — three quarters of a million
+of them per 1024x768 frame.
+
+A framebuffer wants the opposite: stores gathered and reordered freely,
+since nothing reads it until the frame is done, but never held in a
+cache the display controller cannot see. That is Normal Non-cacheable,
+and there was no MAIR index for it — Limine leaves 0 and 1 as Normal
+write-back and 2 through 7 as zero. The kernel now programs index 3
+itself, after checking the slot really is unused, because MAIR is a live
+register and a mapping already made against index 3 would change meaning
+underneath it. If the slot is taken, the framebuffer falls back to
+Normal write-back and says so.
+
+`mmio_report()` prints which type is in use, along with how many
+gigabytes needed 2 MB granularity and how much reported RAM that
+granularity had to leave out. The last number should be zero; it is on
+both machines this has run on.
+
 ### The Pi drivers — written, and not tested on hardware
 
 Three drivers, in the order they matter:
