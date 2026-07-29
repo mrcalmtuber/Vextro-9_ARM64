@@ -96,6 +96,34 @@ static uint64_t gicd_base   = 0x08000000UL;
 static uint64_t gicc_base   = 0x08010000UL;
 static uint64_t virtio_base = 0x0A000000UL;
 
+/*
+ * Which machine this is.
+ *
+ * Not a decoration: a Raspberry Pi shares almost no devices with qemu's
+ * `virt`, so the drivers that run are chosen by this and the ones that
+ * do not are never touched. Set from the device tree's root node, which
+ * names the SoC and cannot lie about it the way a heuristic can.
+ */
+#define BOARD_VIRT  0
+#define BOARD_PI4   1       /* BCM2711: Pi 4, Pi 400, CM4              */
+#define BOARD_PI3   2       /* BCM2837: Pi 3                           */
+
+static int board_kind = BOARD_VIRT;
+
+/* Broadcom peripherals, all zero until a Pi is identified. */
+static uint64_t bcm_periph_base = 0;    /* 0xFE000000 on a Pi 4        */
+static uint64_t bcm_mbox_base   = 0;    /* VideoCore property mailbox  */
+static uint64_t bcm_emmc_base   = 0;    /* SD card host controller     */
+static uint64_t bcm_genet_base  = 0;    /* gigabit ethernet, Pi 4 only */
+
+static const char *board_name(void) {
+    switch (board_kind) {
+        case BOARD_PI4: return "Raspberry Pi 4 (BCM2711)";
+        case BOARD_PI3: return "Raspberry Pi 3 (BCM2837)";
+    }
+    return "qemu virt";
+}
+
 /* ---- PL011 UART ---- */
 
 #define PL011_BASE    pl011_base
@@ -330,7 +358,6 @@ static uint64_t app_region_phys = 0;
 
 static uint64_t dev_l0[512] __attribute__((aligned(4096)));
 static uint64_t dev_l1[512] __attribute__((aligned(4096)));
-static uint64_t dev_l2[512] __attribute__((aligned(4096)));
 
 /*
  * Physical address of a virtual one, asked of the hardware.
@@ -350,38 +377,200 @@ static uint64_t virt_to_phys(const void *p) {
 }
 
 /*
- * Highest physical address the firmware says is backed, rounded up to a
- * gigabyte. Set from Limine's memory map before mmio_map_init() runs.
+ * What physically exists, and where.
+ *
+ * Two lists, both filled before mmio_map_init() runs: the memory the
+ * firmware reports as backed, and the register windows the device tree
+ * says hold devices. The mapper builds tables from them rather than from
+ * constants, which is the difference between a kernel that boots one
+ * machine and one that boots the machine it is on.
+ *
+ * The `virt` device window is the initial entry so that the UART works
+ * before any of this is known — the console has to exist in order to
+ * report that device tree parsing failed.
  */
-static uint64_t ram_top_gb = 4;
+#define MMIO_REGIONS_MAX 10
+#define RAM_REGIONS_MAX  12
 
+typedef struct { uint64_t base, size; } phys_region_t;
+
+static phys_region_t mmio_regions[MMIO_REGIONS_MAX] = {
+    /* qemu virt: GIC at 0x08000000, PL011/PL031/fw_cfg at 0x09000000,
+     * virtio-mmio transports at 0x0A000000 */
+    { 0x08000000ULL, 0x04000000ULL },
+};
+static int mmio_region_count = 1;
+
+static phys_region_t ram_regions[RAM_REGIONS_MAX];
+static int ram_region_count = 0;
+
+#define MMIO_BLOCK   0x200000ULL          /* 2 MB, the L2 block size */
+#define MMIO_GIGA    0x40000000ULL
+
+static void mmio_region_add(uint64_t base, uint64_t size) {
+    if (!base && !size) return;
+    uint64_t end = (base + size + MMIO_BLOCK - 1) & ~(MMIO_BLOCK - 1);
+    base &= ~(MMIO_BLOCK - 1);
+    if (end <= base) return;
+
+    for (int i = 0; i < mmio_region_count; i++) {
+        uint64_t rend = mmio_regions[i].base + mmio_regions[i].size;
+        if (base >= mmio_regions[i].base && end <= rend) return;   /* covered */
+    }
+    if (mmio_region_count >= MMIO_REGIONS_MAX) return;
+    mmio_regions[mmio_region_count].base = base;
+    mmio_regions[mmio_region_count].size = end - base;
+    mmio_region_count++;
+}
+
+/* Replace the built-in `virt` window entirely — a board that is not virt
+ * has nothing at 0x08000000 and mapping it would be a promise about an
+ * address that answers to nobody. */
+static void mmio_region_reset(void) { mmio_region_count = 0; }
+
+/* Adjacent entries are merged, because a firmware memory map arrives as
+ * dozens of small runs and the list only needs to answer "is this
+ * backed?". */
+static void ram_region_add(uint64_t base, uint64_t len) {
+    if (!len) return;
+    uint64_t end = base + len;
+
+    for (int i = 0; i < ram_region_count; i++) {
+        uint64_t rend = ram_regions[i].base + ram_regions[i].size;
+        if (base <= rend && end >= ram_regions[i].base) {
+            if (base < ram_regions[i].base) ram_regions[i].base = base;
+            if (end > rend) rend = end;
+            ram_regions[i].size = rend - ram_regions[i].base;
+            return;
+        }
+    }
+    if (ram_region_count >= RAM_REGIONS_MAX) return;
+    ram_regions[ram_region_count].base = base;
+    ram_regions[ram_region_count].size = len;
+    ram_region_count++;
+}
+
+static int region_covers(const phys_region_t *list, int n,
+                         uint64_t base, uint64_t size) {
+    uint64_t end = base + size;
+    for (int i = 0; i < n; i++)
+        if (base >= list[i].base && end <= list[i].base + list[i].size) return 1;
+    return 0;
+}
+
+static int region_overlaps(const phys_region_t *list, int n,
+                           uint64_t base, uint64_t size) {
+    uint64_t end = base + size;
+    for (int i = 0; i < n; i++)
+        if (base < list[i].base + list[i].size && end > list[i].base) return 1;
+    return 0;
+}
+
+/*
+ * Second-level tables come from a pool, one per gigabyte that needs
+ * finer granularity than a 1 GB block. On qemu virt exactly one does; on
+ * a Pi 4 it is two, since the peripherals share their gigabyte with RAM.
+ */
+#define MMIO_L2_MAX 8
+static uint64_t dev_l2_pool[MMIO_L2_MAX][512] __attribute__((aligned(4096)));
+static uint64_t dev_l2_gb[MMIO_L2_MAX];
+static int dev_l2_n = 0;
+
+static uint64_t *mmio_l2_alloc(uint64_t gb) {
+    for (int i = 0; i < dev_l2_n; i++)
+        if (dev_l2_gb[i] == gb) return dev_l2_pool[i];
+    if (dev_l2_n >= MMIO_L2_MAX) return 0;
+    uint64_t *t = dev_l2_pool[dev_l2_n];
+    for (int i = 0; i < 512; i++) t[i] = 0;
+    dev_l2_gb[dev_l2_n] = gb;
+    dev_l2_n++;
+    return t;
+}
+
+/*
+ * Build the tables.
+ *
+ * Every gigabyte is classified independently. One that is entirely
+ * backed RAM and holds no device becomes a single 1 GB block, which is
+ * both cheapest and kindest to the TLB. Anything else — a device in it,
+ * a hole in it, or gigabyte zero, which always carries the application
+ * window — is described 2 MB at a time.
+ *
+ * The rule that matters is what happens to a block that is *neither* RAM
+ * nor device: it is left invalid, and that is the whole point.
+ *
+ * Mapping unbacked space as Normal memory is the bug that cost this port
+ * more time than anything else. Normal memory is speculatable — the CPU
+ * may fetch from it unasked, because the architecture guarantees reading
+ * backed memory has no side effects. Map a range that is not backed and
+ * that guarantee is void: the core eventually speculates into a physical
+ * address nothing answers for. Under emulation this is harmless, since
+ * tcg does not speculate. On real silicon under a hypervisor it is a
+ * stage-2 fault on an access with no instruction syndrome to decode, and
+ * qemu's hvf backend responds by aborting the process outright:
+ * `Assertion failed: (isv)`. It fires half a second into any guest that
+ * is executing instructions, never in one parked in wfi, and bears no
+ * relation to what the code was doing — because the access was never in
+ * the code.
+ *
+ * Deriving the answer from the firmware's own map rather than from a
+ * constant is what makes that impossible to get wrong on a machine
+ * nobody has tried yet.
+ */
 static void mmio_map_init(void) {
-    for (int i = 0; i < 512; i++) { dev_l0[i] = 0; dev_l1[i] = 0; dev_l2[i] = 0; }
+    for (int i = 0; i < 512; i++) { dev_l0[i] = 0; dev_l1[i] = 0; }
+    dev_l2_n = 0;
 
-    /*
-     * Only the 2 MB blocks that hold real devices, rather than the whole
-     * first gigabyte.
-     *
-     * Mapping all of 0..1 GB is one descriptor and very tempting, but most
-     * of that range is unbacked on this machine, and a mapping is a promise
-     * that an access will land somewhere. Under emulation a stray read of
-     * an unbacked address is logged and returns zero; under a hypervisor it
-     * is a stage-2 fault on an instruction the backend may not be able to
-     * decode, and qemu's hvf backend responds by aborting the whole
-     * process. That failure names neither the address nor the instruction,
-     * and it takes the serial log's tail with it.
-     *
-     * Mapping only what exists keeps that from being possible: a stray low
-     * access now takes an ordinary stage-1 fault, and the handler prints
-     * ESR and FAR and says exactly where it came from.
-     *
-     *   0x08000000  GICv2 distributor and CPU interface
-     *   0x09000000  PL011 UART, PL031 RTC, fw_cfg, PL061 GPIO
-     *   0x0A000000  virtio-mmio transports
-     */
-    for (uint64_t blk = 0x08000000ULL; blk < 0x0C000000ULL; blk += 0x200000ULL) {
-        dev_l2[blk >> 21] = blk | PTE_BLOCK | PTE_ATTR(MAIR_DEVICE_IDX) |
-                            PTE_AP_RW | PTE_AF | PTE_PXN | PTE_UXN;
+    /* How far up anything of interest reaches. */
+    uint64_t top = 0;
+    for (int i = 0; i < ram_region_count; i++) {
+        uint64_t e = ram_regions[i].base + ram_regions[i].size;
+        if (e > top) top = e;
+    }
+    for (int i = 0; i < mmio_region_count; i++) {
+        uint64_t e = mmio_regions[i].base + mmio_regions[i].size;
+        if (e > top) top = e;
+    }
+    uint64_t ngb = (top + MMIO_GIGA - 1) / MMIO_GIGA;
+    if (ngb > 512) ngb = 512;
+
+    const uint64_t normal_flags = PTE_ATTR(0) | PTE_AP_RW | (3ULL << 8) |
+                                  PTE_AF | PTE_PXN | PTE_UXN;
+    const uint64_t device_flags = PTE_ATTR(MAIR_DEVICE_IDX) | PTE_AP_RW |
+                                  PTE_AF | PTE_PXN | PTE_UXN;
+
+    for (uint64_t g = 0; g < ngb; g++) {
+        uint64_t gbase = g * MMIO_GIGA;
+
+        int whole_ram = region_covers(ram_regions, ram_region_count, gbase, MMIO_GIGA);
+        int has_dev   = region_overlaps(mmio_regions, mmio_region_count, gbase, MMIO_GIGA);
+
+        if (g != 0 && whole_ram && !has_dev) {
+            dev_l1[g] = gbase | PTE_BLOCK | normal_flags;
+            continue;
+        }
+
+        uint64_t *l2 = mmio_l2_alloc(g);
+        if (!l2) {
+            /* Out of tables. Falling back to a 1 GB Normal block is only
+             * safe where the gigabyte really is all RAM; otherwise leave
+             * it unmapped and let a fault name the address. */
+            if (whole_ram) dev_l1[g] = gbase | PTE_BLOCK | normal_flags;
+            continue;
+        }
+
+        for (uint64_t b = 0; b < 512; b++) {
+            uint64_t pa = gbase + b * MMIO_BLOCK;
+            /* Device first: where a device tree claims registers, they are
+             * registers, whatever a memory map may also say about it. */
+            if (region_overlaps(mmio_regions, mmio_region_count, pa, MMIO_BLOCK))
+                l2[b] = pa | PTE_BLOCK | device_flags;
+            else if (region_covers(ram_regions, ram_region_count, pa, MMIO_BLOCK))
+                l2[b] = pa | PTE_BLOCK | normal_flags;
+            else
+                l2[b] = 0;
+        }
+        dev_l1[g] = virt_to_phys(l2) | PTE_TABLE;
     }
 
     /*
@@ -396,44 +585,18 @@ static void mmio_map_init(void) {
      *
      * The backing store is still a .bss array; only the view is
      * different. app_region_phys is filled in by the loader before this
-     * runs, because a mapping needs to know what it points at.
+     * runs, because a mapping needs to know what it points at. It is
+     * written after the loop so it survives whatever the loop decided
+     * about gigabyte zero.
      */
     if (app_region_phys) {
-        dev_l2[APP_WINDOW_VA >> 21] =
-            app_region_phys | PTE_BLOCK | PTE_ATTR(0) | PTE_AP_RW |
-            (3ULL << 8) | PTE_AF | PTE_UXN;     /* PXN absent: EL1 may run it */
-    }
-
-    dev_l1[0] = virt_to_phys(dev_l2) | PTE_TABLE;
-
-    /*
-     * Identity-map the gigabytes that actually contain RAM, as Normal
-     * memory, and not one gigabyte more.
-     *
-     * The upper bound is the important part, and getting it wrong cost
-     * this port more time than anything else. Normal memory is
-     * speculatable: the CPU may fetch from it without being asked,
-     * because the architecture guarantees that reading backed memory has
-     * no side effects. Map a range that is *not* backed and that
-     * guarantee is void — the core will eventually speculate into a
-     * physical address nothing answers for.
-     *
-     * Under emulation that is harmless, since tcg does not speculate. On
-     * real silicon under a hypervisor it is a stage-2 fault on an access
-     * with no instruction syndrome to decode, and qemu's hvf backend
-     * responds by aborting the process: `Assertion failed: (isv)`. It
-     * fires half a second into any guest that is executing instructions,
-     * never in one parked in wfi, and bears no relation to what the code
-     * was doing — because the access was never in the code.
-     *
-     * So the bound comes from the firmware's memory map rather than from
-     * a constant. Limine mapped this range too, and replacing TTBR0
-     * without it would unmap anything the bootloader reported by physical
-     * address — the framebuffer among them.
-     */
-    for (uint64_t g = 1; g < ram_top_gb; g++) {
-        dev_l1[g] = (g << 30) | PTE_BLOCK | PTE_ATTR(0) | PTE_AP_RW |
-                    (3ULL << 8) | PTE_AF | PTE_PXN | PTE_UXN;
+        uint64_t *l2 = mmio_l2_alloc(0);
+        if (l2) {
+            l2[APP_WINDOW_VA >> 21] =
+                app_region_phys | PTE_BLOCK | PTE_ATTR(0) | PTE_AP_RW |
+                (3ULL << 8) | PTE_AF | PTE_UXN; /* PXN absent: EL1 may run it */
+            dev_l1[0] = virt_to_phys(l2) | PTE_TABLE;
+        }
     }
 
     dev_l0[0] = virt_to_phys(dev_l1) | PTE_TABLE;
@@ -494,7 +657,130 @@ static void machine_reset(void) {
  * Matching names works on qemu and quietly fails everywhere else, which
  * is precisely the class of bug that cannot be found without the board.
  */
-static void fdt_probe(const void *blob) {
+static int fdt_ok = 0;
+
+/*
+ * Discovery: addresses only, no output.
+ *
+ * This has to run *before* mmio_map_init(), which is the awkward part.
+ * The mapper needs to know which physical windows hold devices in order
+ * to map them, and until it has run there is no UART — so discovery
+ * cannot print a word about what it found, or even that it failed. All
+ * of that waits for fdt_report(), which runs once the console exists.
+ *
+ * The alternative, mapping a generous window and probing afterwards, is
+ * what the port did until a Raspberry Pi turned up: its peripherals are
+ * at 0xFE000000 and no fixed guess covers both that and qemu's
+ * 0x08000000 without also mapping three gigabytes of nothing in between.
+ *
+ * Matched by `compatible` rather than node name. A board is free to call
+ * its UART node anything it likes and frequently does; what it may not
+ * do is claim compatibility with "arm,pl011" for something that is not
+ * one. Matching names works on qemu and quietly fails everywhere else,
+ * which is precisely the class of bug that cannot be found without the
+ * board.
+ */
+static void fdt_discover(const void *blob) {
+    fdt_ok = fdt_init(blob);
+    if (!fdt_ok) return;
+
+    /*
+     * The board first, because it decides which of the rest applies.
+     * The Pi 4's tree claims "brcm,bcm2711"; the Pi 3's claims
+     * "brcm,bcm2837". Both also claim a "raspberrypi,*" model string,
+     * but the SoC is what the register layout follows.
+     */
+    if (fdt_board_is("brcm,bcm2711"))      board_kind = BOARD_PI4;
+    else if (fdt_board_is("brcm,bcm2837")) board_kind = BOARD_PI3;
+    else if (fdt_board_is("brcm,bcm2836") ||
+             fdt_board_is("brcm,bcm2835")) board_kind = BOARD_PI3;
+
+    /*
+     * Nothing below names a node, only what it claims compatibility
+     * with. A Raspberry Pi's UART node is "serial@7e201000" and its
+     * interrupt controller is "interrupt-controller@40041000"; neither
+     * of those strings should have to appear in a kernel, and a lookup
+     * that depends on them is a lookup that works on exactly one
+     * machine.
+     */
+    uint64_t v;
+    if ((v = fdt_reg_base(0, "arm,pl011")))  pl011_base = v;
+    if ((v = fdt_reg_base(0, "arm,pl031")))  pl031_base = v;
+
+    /* GICv2 first, then v3. The two are not interchangeable — v3's second
+     * range is a redistributor, not a CPU interface, and its CPU
+     * interface is reached through system registers instead — so only the
+     * distributor is taken from a v3 tree and the rest is left alone
+     * until something here actually programs one. */
+    static const char *gic2[] = { "arm,cortex-a15-gic", "arm,gic-400", 0 };
+    for (int i = 0; gic2[i]; i++) {
+        if ((v = fdt_reg_index(0, gic2[i], 0, 0))) {
+            gicd_base = v;
+            if ((v = fdt_reg_index(0, gic2[i], 1, 0))) gicc_base = v;
+            break;
+        }
+    }
+    if ((v = fdt_reg_base(0, "arm,gic-v3"))) gicd_base = v;
+    if ((v = fdt_reg_base(0, "virtio,mmio"))) virtio_base = v;
+
+    if (board_kind != BOARD_VIRT) {
+        /*
+         * A Pi's peripherals are one contiguous window, so finding any
+         * one node inside it locates the whole thing. The GPIO
+         * controller is the anchor: every Pi has one, it is always at
+         * offset 0x200000, and unlike the UART it is never disabled or
+         * handed to the second core.
+         */
+        if ((v = fdt_reg_base(0, "brcm,bcm2711-gpio")) ||
+            (v = fdt_reg_base(0, "brcm,bcm2835-gpio")))
+            bcm_periph_base = v - 0x200000ULL;
+        else if (pl011_base)
+            bcm_periph_base = pl011_base - 0x201000ULL;
+
+        /* The mailbox has a node of its own; the arithmetic is only the
+         * fallback for a tree that leaves it out. */
+        if (!(bcm_mbox_base = fdt_reg_base(0, "brcm,bcm2835-mbox")))
+            if (bcm_periph_base) bcm_mbox_base = bcm_periph_base + 0xB880ULL;
+
+        /* Storage. The Pi 4 routes the SD card to a second, SDHCI-clean
+         * controller ("emmc2"); earlier boards use the Arasan block. */
+        if (!(bcm_emmc_base = fdt_reg_base(0, "brcm,bcm2711-emmc2")))
+            if (!(bcm_emmc_base = fdt_reg_base(0, "brcm,bcm2835-sdhci")))
+                bcm_emmc_base = fdt_reg_base(0, "brcm,bcm2711-sdhci");
+
+        /* Ethernet, Pi 4 only: earlier boards hang theirs off USB. */
+        if (!(bcm_genet_base = fdt_reg_base(0, "brcm,bcm2711-genet-v5")))
+            bcm_genet_base = fdt_reg_base(0, "brcm,genet-v5");
+    }
+
+    /*
+     * Tell the mapper what to map.
+     *
+     * The `virt` default window is dropped outright on a board rather
+     * than kept alongside: a Pi has nothing at 0x08000000, and a mapping
+     * is a promise that an access lands somewhere. Promising for an
+     * address nothing answers to is how this port lost a week.
+     */
+    if (board_kind != BOARD_VIRT) {
+        mmio_region_reset();
+        if (bcm_periph_base) {
+            /* The whole peripheral block: UART, GPIO, mailbox, SD, the
+             * lot. 24 MB on a BCM2711 and 16 MB before it. */
+            mmio_region_add(bcm_periph_base, 0x01800000ULL);
+        }
+        if (bcm_genet_base)  mmio_region_add(bcm_genet_base, 0x10000ULL);
+        if (gicd_base)       mmio_region_add(gicd_base, 0x8000ULL);
+        if (gicc_base)       mmio_region_add(gicc_base, 0x8000ULL);
+        if (pl011_base)      mmio_region_add(pl011_base, 0x1000ULL);
+    } else {
+        if (virtio_base) mmio_region_add(virtio_base, 0x4000ULL);
+        if (gicd_base)   mmio_region_add(gicd_base, 0x10000ULL);
+        if (pl011_base)  mmio_region_add(pl011_base, 0x1000ULL);
+    }
+}
+
+/* Reporting, once there is a console to report to. */
+static void fdt_report(const void *blob) {
     serial_puts("[socrates/arm64] fdt: blob ");
     serial_put_hex64((uint64_t)(uintptr_t)blob);
     if (blob) {
@@ -502,29 +788,24 @@ static void fdt_probe(const void *blob) {
         serial_put_hex32(fdt_be32((const uint8_t *)blob));
     }
     serial_puts("\n");
-    if (!fdt_init(blob)) {
+    if (!fdt_ok) {
         serial_puts("[socrates/arm64] fdt: none (keeping virt defaults)\n");
         return;
     }
 
-    uint64_t v;
-    if ((v = fdt_reg_base("pl011",  "arm,pl011")))       pl011_base  = v;
-    if ((v = fdt_reg_base("pl031",  "arm,pl031")))       pl031_base  = v;
-    /* GICv2 first, then v3. The two are not interchangeable — v3's second
-     * range is a redistributor, not a CPU interface, and its CPU
-     * interface is reached through system registers instead — so only the
-     * distributor is taken from a v3 tree and the rest is left alone
-     * until something here actually programs one. */
-    uint32_t len = 0;
-    const uint8_t *reg = fdt_find_prop("intc", "arm,cortex-a15-gic", "reg", &len);
-    if (reg && len >= 16) {
-        gicd_base = fdt_be64(reg);
-        if (len >= 32) gicc_base = fdt_be64(reg + 16);
-    } else {
-        reg = fdt_find_prop("intc", "arm,gic-v3", "reg", &len);
-        if (reg && len >= 16) gicd_base = fdt_be64(reg);
+    serial_puts("[socrates/arm64] board: ");
+    serial_puts(board_name());
+    serial_puts("\n");
+
+    if (board_kind != BOARD_VIRT) {
+        serial_puts("[socrates/arm64] bcm: periph ");
+        serial_put_hex64(bcm_periph_base);
+        serial_puts(" mbox "); serial_put_hex64(bcm_mbox_base);
+        serial_puts("\n[socrates/arm64] bcm: emmc ");
+        serial_put_hex64(bcm_emmc_base);
+        serial_puts(" genet "); serial_put_hex64(bcm_genet_base);
+        serial_puts("\n");
     }
-    if ((v = fdt_reg_base("virtio_mmio", "virtio,mmio"))) virtio_base = v;
 
     serial_puts("[socrates/arm64] fdt: uart ");
     serial_put_hex64(pl011_base);

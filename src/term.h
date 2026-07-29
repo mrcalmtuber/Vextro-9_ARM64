@@ -356,11 +356,16 @@ static void term_cmd_df(void) {
     uint32_t total = fs_total_kb(), free_kb = fs_free_kb();
     term_print("  volume    ");
     term_print(fs_name());
-    term_print(" on ata0 (");
+    term_print(" on ");
+    term_print(blk_bus_name());       /* virtio-blk, or the SD card on a Pi */
+    term_print(" (");
     uint_to_str(fs_kind == FS_EXFAT ? exf_vol.cluster_count
                                     : fat_vol.nclusters, nb);
     term_print(nb);
-    term_print(" clusters)\n  total     ");
+    term_print(" clusters)\n  device    ");
+    uint_to_str((uint32_t)(blk_sectors() / 2048), nb);
+    term_print(nb);
+    term_print(" MB raw\n  total     ");
     uint_to_str(total / 1024, nb);
     term_print(nb);
     term_print(" MB\n  used      ");
@@ -406,7 +411,11 @@ static void term_cmd_net(void) {
         term_print_c("no network adapter detected\n", 2);
         return;
     }
-    term_print("  adapter   Intel 82540EM (e1000)\n");
+    /* Not "Intel 82540EM": there has never been one on this tree, and on
+     * a Pi 4 the adapter is a Broadcom MAC on the SoC bus. */
+    term_print("  adapter   ");
+    term_print(net_adapter_name());
+    term_print("\n");
 
     static const char hex[] = "0123456789ABCDEF";
     char mac[20];

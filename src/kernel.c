@@ -5,6 +5,8 @@
 #include "virtio.h"
 #include "vtinput.h"
 #include "vtgpu.h"
+#include "mbox.h"
+#include "pifb.h"
 #include "ata.h"
 #include "gfx.h"                /* rtc_read: exFAT timestamps entries */
 #include "exfat.h"
@@ -403,19 +405,30 @@ void kmain(void) {
      * an option — this has to be the first statement in the kernel.
      */
     /*
-     * Establish how much physical memory is real before mapping any of
-     * it. This has to precede the first line of output, because the UART
-     * is reached through the tables mmio_map_init() builds.
+     * Establish what physically exists before mapping any of it. This
+     * has to precede the first line of output, because the UART is
+     * reached through the tables mmio_map_init() builds.
+     *
+     * Every entry counts, not just the usable ones: reserved memory is
+     * still backed memory, and the framebuffer and the firmware's own
+     * tables live in entries this kernel must be able to reach.
      */
     if (memmap_request.response) {
-        uint64_t top = 0;
         for (uint64_t i = 0; i < memmap_request.response->entry_count; i++) {
             struct limine_memmap_entry *e = memmap_request.response->entries[i];
-            uint64_t end = e->base + e->length;
-            if (end > top) top = end;
+            ram_region_add(e->base, e->length);
         }
-        if (top) ram_top_gb = (top + (1ull << 30) - 1) >> 30;
     }
+
+    /*
+     * And where the devices are — also before mapping, and therefore
+     * before any output at all. On qemu `virt` the built-in addresses
+     * are already right; on a board none of them are, including the
+     * UART's, so there is no way to report a problem here. fdt_report()
+     * says what was found once there is a console to say it on.
+     */
+    const void *dtb = dtb_request.response ? dtb_request.response->dtb_ptr : 0;
+    fdt_discover(dtb);
 
     app_region_init();
     mmio_map_init();
@@ -424,10 +437,11 @@ void kmain(void) {
 
     /* Vectors first: from here on a fault says what it was instead of
      * hanging, which matters more the more driver code arrives. */
-    /* Learn where the hardware is before taking it over. Both of the
-     * next two calls write to device registers, and on anything that is
-     * not qemu `virt` the built-in addresses are wrong. */
-    fdt_probe(dtb_request.response ? dtb_request.response->dtb_ptr : 0);
+    fdt_report(dtb);
+
+    /* What the VideoCore says about the board, on a Pi. Nothing to ask
+     * on a machine that has no mailbox, so this is silent on virt. */
+    mbox_report();
 
     exceptions_init();
     timer_takeover();
@@ -447,6 +461,14 @@ void kmain(void) {
      * needs no display support from the firmware at all, which is what
      * running on hardware without a UEFI GOP will require.
      *
+     * On a Raspberry Pi neither of those exists. There is no virtio
+     * anything, and a UEFI graphics protocol only exists if the board
+     * was booted through the UEFI firmware rather than the stock one.
+     * The VideoCore will hand over a framebuffer if asked directly, and
+     * that path depends on nothing but the mailbox — so it sits between
+     * the two, tried when the kernel-driven option is absent but before
+     * giving up and taking whatever the firmware left.
+     *
      * Limine's framebuffer remains the fallback, so a machine with only
      * ramfb still boots to a desktop.
      */
@@ -458,6 +480,12 @@ void kmain(void) {
         panel_h  = vgpu_h;
         pitch_px = vgpu_w;
         vram     = (volatile uint32_t *)vgpu_fb;
+    } else if (board_kind != BOARD_VIRT && pifb_init(1280, 800)) {
+        panel_w  = pifb_w;
+        panel_h  = pifb_h;
+        pitch_px = pifb_pitch_px;
+        vram     = pifb_addr;
+        serial_puts("[socrates/arm64] display: VideoCore framebuffer\n");
     } else if (fb_request.response != NULL &&
                fb_request.response->framebuffer_count >= 1) {
         struct limine_framebuffer *fb = fb_request.response->framebuffers[0];
@@ -494,7 +522,7 @@ void kmain(void) {
      * it needs nothing from the display, and bringing it up first means a
      * failure is reported in the first second rather than after the
      * animation has played out. */
-    ata_init();
+    blk_init();
 
     /*
      * Prove the disk end to end rather than trusting the capacity field.
@@ -505,9 +533,9 @@ void kmain(void) {
      * checking for the partition table's signature costs one request and
      * distinguishes "a disk is attached" from "the disk works".
      */
-    if (ata_present) {
+    if (blk_present()) {
         static uint8_t probe[512];
-        if (ata_read(0, 1, probe) == 0) {
+        if (blk_read(0, 1, probe) == 0) {
             serial_puts("[socrates/arm64] sector 0 reads, boot signature ");
             serial_puts((probe[510] == 0x55 && probe[511] == 0xAA)
                         ? "present\n" : "absent\n");

@@ -31,7 +31,24 @@ Five virtio devices — keyboard, tablet, disk, network, GPU — share one virtq
 
 ### Hardware discovery
 
-The kernel reads the flattened device tree, so the UART, RTC, GIC and virtio transport addresses come from the firmware rather than from constants. Devices are matched by `compatible`, not by node name. The qemu `virt` addresses remain as fallbacks for machines that pass no tree.
+The kernel reads the flattened device tree, so every device address comes from the firmware rather than from a constant. Devices are matched by `compatible` alone, never by node name — a Raspberry Pi's UART node is `serial@7e201000` and its interrupt controller is `interrupt-controller@40041000`, and neither string should have to appear in a kernel. The qemu `virt` addresses remain as fallbacks for machines that pass no tree.
+
+Two things the parser has to get right that only show up off qemu. **Cell counts are per-node**: `reg` widths come from the parent's `#address-cells`, which is the 64-bit default on `virt` and one cell under a Pi's `soc`. And **bus addresses are not CPU addresses**: a Pi describes its peripherals at `0x7e000000` because that is what the VideoCore sees, while the ARM core reaches the same registers at `0xfe000000`. The `ranges` property is the translation, and ignoring it programs a device that is not there.
+
+`make test` runs the parser on the host against the `bcm2711-rpi-4-b.dtb` the Raspberry Pi firmware actually ships and against a blob dumped from qemu, checking seventeen addresses worked through `ranges` by hand.
+
+The memory map follows from the same source: `mmio_map_init()` classifies each gigabyte from what the firmware reports as backed and what the tree says holds registers, mapping RAM as Normal, devices as Device, and everything else **not at all**.
+
+### Raspberry Pi
+
+Written, and **not yet run on hardware** — there is no Pi here to test against, and the source says so where it matters:
+
+- **`src/mbox.h`** — the VideoCore property mailbox. A Pi is a VideoCore computer with an ARM core attached: the firmware owns the clocks, the power rails and the display, so there is no register that sets the SD clock, only a message asking for it
+- **`src/pifb.h`** — a framebuffer straight from the firmware, eight tags in one message; the display path that needs no UEFI graphics protocol at all
+- **`src/emmc.h`** — the SD card, which on a Pi *is* the disk. SDHCI, polled, full CMD0/CMD8/ACMD41/CMD2/CMD3/CMD9/CMD7/ACMD6 bring-up, both CSD versions
+- **`src/genet.h`** — the Pi 4's on-SoC gigabit MAC, with descriptor rings in the controller's own SRAM and explicit cache maintenance for the buffers, since DMA here is not coherent the way x86's is
+
+They sit behind the interfaces everything else already uses: `blk.h` dispatches storage between virtio-blk and the SD card, `e1000.h` dispatches the network between virtio-net and GENET. The two backends never coexist, so the choice is made once at boot.
 
 ---
 
@@ -286,8 +303,12 @@ src/            Kernel source
   vectors.S     VBAR_EL1 table + the `svc #0` save/restore trampoline
   virtio.h      virtio-mmio transport + split virtqueue (shared by all five)
   vtinput.h     Keyboard + absolute tablet     vtgpu.h  virtio-gpu scanout
+  blk.h         Block layer: virtio-blk or the SD card, one sector view
   ata.h         virtio-blk behind the ATA name the filesystems call
-  e1000.h       virtio-net behind the NIC name netstack.h calls
+  emmc.h        Raspberry Pi SD card (SDHCI, polled)
+  e1000.h       Network dispatch behind the NIC name netstack.h calls
+  genet.h       Broadcom GENET v5 — the Pi 4's gigabit MAC
+  mbox.h        VideoCore property mailbox    pifb.h  firmware framebuffer
   keyboard.h    Ring buffer + scancode tables (no ISR, no port I/O)
   igpu.h        Inert: no integrated GPU on this machine
   bsdload.h     .bsd loader — executable window, I-cache maintenance

@@ -39,7 +39,20 @@ FIRMWARE := /opt/homebrew/share/qemu/edk2-aarch64-code.fd
 
 RES ?= 1024x768x32
 
-.PHONY: all iso run clean FORCE
+.PHONY: all iso run clean test FORCE
+
+# The device tree parser is pure byte manipulation with no architecture
+# in it, so it can be tested on the host against blobs from real
+# machines — a Raspberry Pi 4's, as shipped by the firmware, and qemu's
+# own. Every address the Pi drivers are programmed with comes out of
+# this file, and a wrong one produces a board that boots to a black
+# screen and says nothing.
+build/fdt_test: tools/fdt_test.c src/fdt.h
+	@mkdir -p build
+	cc -O2 -Wall -Wextra -o $@ $<
+
+test: build/fdt_test
+	./build/fdt_test tools/testdata/bcm2711-rpi-4-b.dtb tools/testdata/qemu-virt.dtb
 
 FORCE:
 

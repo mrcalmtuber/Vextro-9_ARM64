@@ -58,8 +58,20 @@ ACCEL = sys.argv[2] if len(sys.argv) > 2 else "hvf"
 # silicon does, so a tcg run catches missing barriers hvf would hide.
 cpu = ["-cpu", "host"] if ACCEL == "hvf" else ["-cpu", "cortex-a72"]
 
+# `acpi=off` makes the firmware publish a device tree.
+#
+# EDK2 hands the OS *either* ACPI tables or a DTB, never both: when ACPI
+# is available it deliberately removes the device tree from the UEFI
+# configuration table so a guest cannot try to use both descriptions of
+# the same machine. Limine reads that table, so with ACPI on there is no
+# blob to pass and the kernel keeps its built-in `virt` addresses —
+# which is correct on this machine and means the discovery path is never
+# exercised. Turning ACPI off is the only way to test on virt what will
+# always be true on a board.
+machine = "virt,acpi=off" if os.environ.get("DTB") == "1" else "virt"
+
 cmd = [
-    "qemu-system-aarch64", "-M", "virt", "-m", "2048", *cpu,
+    "qemu-system-aarch64", "-M", machine, "-m", "2048", *cpu,
     "-accel", ACCEL,
     "-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={FIRMWARE}",
     "-drive", f"if=pflash,format=raw,unit=1,file={ROOT}/build/efi-vars.fd",

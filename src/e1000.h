@@ -108,7 +108,7 @@ static uint32_t e1000_read(uint32_t reg) {
     return 0;
 }
 
-static void e1000_read_mac(void) {
+static void vnet_read_mac(void) {
     if (!e1000_found) return;
     volatile uint8_t *cfg = (volatile uint8_t *)mmio32(vnet_base + VIO_CONFIG);
     for (int i = 0; i < 6; i++) e1000_mac[i] = cfg[i];
@@ -123,7 +123,7 @@ static void e1000_read_mac(void) {
  * stall the next send, and completions are reaped rather than waited on —
  * nothing above this blocks on a transmit.
  */
-static int e1000_transmit(const uint8_t *data, uint16_t len) {
+static int vnet_transmit(const uint8_t *data, uint16_t len) {
     if (!e1000_found) return -1;
     if (len > VNET_FRAME_MAX) return -1;
 
@@ -145,7 +145,7 @@ static int e1000_transmit(const uint8_t *data, uint16_t len) {
     return 0;
 }
 
-static int e1000_rx_poll(uint8_t **out_buf, uint16_t *out_len) {
+static int vnet_rx_poll(uint8_t **out_buf, uint16_t *out_len) {
     if (!e1000_found) return 0;
 
     if (vnet_pending >= 0) {            /* the stack has finished with it */
@@ -186,7 +186,7 @@ static int e1000_rx_poll(uint8_t **out_buf, uint16_t *out_len) {
  * the MMU, so nothing is offset by hand. The parameter stays so kernel.c
  * reads the same on both trees.
  */
-static void e1000_init(uint64_t hhdm_offset) {
+static void vnet_init(uint64_t hhdm_offset) {
     (void)hhdm_offset;
     e1000_found = 0;
 
@@ -234,7 +234,7 @@ static void e1000_init(uint64_t hhdm_offset) {
     for (uint32_t i = 0; i < VNET_RX_BUFS && i < vnet_rx.qsize; i++)
         vnet_post_rx(i);
 
-    e1000_read_mac();
+    vnet_read_mac();
 
     serial_puts("[socrates/arm64] virtio-net: up, MAC ");
     static const char hx[] = "0123456789ABCDEF";
@@ -244,6 +244,68 @@ static void e1000_init(uint64_t hhdm_offset) {
         serial_putc(hx[e1000_mac[i] & 0xF]);
     }
     serial_puts("\n");
+}
+
+/*
+ * Two adapters, one interface.
+ *
+ * netstack.h talks to e1000_transmit / e1000_rx_poll / e1000_mac and
+ * knows nothing about either driver behind them — a name inherited from
+ * the x86 tree, where there really is an Intel NIC. On this one it has
+ * always been a fiction, and it is now a fiction covering two genuinely
+ * different pieces of hardware: a virtio transport under qemu, and a
+ * Broadcom MAC on a Raspberry Pi 4.
+ *
+ * They never coexist. A Pi has no virtio devices and qemu's virt has no
+ * GENET, so this is a decision made once at boot rather than a routing
+ * problem.
+ */
+#include "genet.h"
+
+#define NET_NONE   0
+#define NET_VIRTIO 1
+#define NET_GENET  2
+
+static int net_backend = NET_NONE;
+
+static const char *net_adapter_name(void) {
+    switch (net_backend) {
+        case NET_VIRTIO: return "virtio-net";
+        case NET_GENET:  return "Broadcom GENET";
+    }
+    return "none";
+}
+
+static int e1000_transmit(const uint8_t *data, uint16_t len) {
+    if (net_backend == NET_GENET)  { genet_transmit(data, len); return 0; }
+    if (net_backend == NET_VIRTIO) return vnet_transmit(data, len);
+    return -1;
+}
+
+static int e1000_rx_poll(uint8_t **out_buf, uint16_t *out_len) {
+    if (net_backend == NET_GENET)  return genet_rx_poll(out_buf, out_len);
+    if (net_backend == NET_VIRTIO) return vnet_rx_poll(out_buf, out_len);
+    return 0;
+}
+
+/* The GENET's address came from the firmware at probe time and cannot be
+ * re-read out of a config space that does not exist, so this is only
+ * ever the virtio path's business. */
+static void e1000_read_mac(void) {
+    if (net_backend == NET_VIRTIO) vnet_read_mac();
+}
+
+static void e1000_init(uint64_t hhdm_offset) {
+    net_backend = NET_NONE;
+
+    vnet_init(hhdm_offset);
+    if (e1000_found) { net_backend = NET_VIRTIO; return; }
+
+    if (genet_init()) {
+        for (int i = 0; i < 6; i++) e1000_mac[i] = genet_mac[i];
+        e1000_found = 1;
+        net_backend = NET_GENET;
+    }
 }
 
 #endif /* E1000_H */

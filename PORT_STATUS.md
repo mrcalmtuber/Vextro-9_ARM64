@@ -14,7 +14,7 @@ untouched and unaffected.
 | M4 | Network — virtio-net, TCP/IP, HTTP, browser | done |
 | M5 | Userland — aarch64 `.bsd`, `svc #0` | done |
 | M6 | Model and Wikipedia | done (see the speed caveat) |
-| M7 | Real hardware | device tree done; Pi drivers not written (see below) |
+| M7 | Real hardware | device tree done and tested against a real Pi blob; Pi drivers written, untested on hardware (see below) |
 
 Boot animation plays, the login screen renders and animates at a locked
 **60 fps**, typing fills the password field, the pointer tracks the host
@@ -131,32 +131,110 @@ to a desktop unchanged. Presenting costs two commands per frame
 (TRANSFER_TO_HOST_2D then RESOURCE_FLUSH) because a virtio-gpu resource
 is not on screen the moment it is written, unlike a linear framebuffer.
 
-## M7: what is done and what is not
+## M7: real hardware
 
-**Done, and verified:** `src/fdt.h` parses the flattened device tree, and
-every device address the kernel uses — UART, RTC, GIC distributor and CPU
-interface, virtio transports — now comes from it instead of a constant.
-Checked against qemu's real device tree: all four match what the tree
-says. The qemu `virt` constants remain as defaults, so a machine that
-passes no tree boots exactly as before.
+### The device tree — done, and tested against a real board's blob
 
-Getting the tree at all needs `-M virt,acpi=off`. Under UEFI, EDK2 chooses
-between ACPI and a device tree and installs only one; by default on `virt`
-it is ACPI, so Limine's DTB request comes back empty. That is not a
-failure — it is what a real board would not do, and the fallback exists
-for exactly this case.
+`src/fdt.h` parses the flattened device tree, and every device address
+the kernel uses comes from it instead of a constant. The qemu `virt`
+values remain as defaults, so a machine that passes no tree boots exactly
+as before.
 
-**Not done:** the Raspberry Pi drivers — mailbox framebuffer, SD, USB.
-These are not written, deliberately. There is no Pi here to test against,
-and an untested driver for hardware nobody has run is the thing this
-project's own plan warns against shipping. What the device tree work buys
-is that the rest of the kernel no longer assumes it is on `virt`, which is
-the part that had to happen first either way.
+Two things it had to learn to handle a Raspberry Pi's tree, both of which
+the first version got away with on qemu and would have got wrong on a
+board:
 
-**Also worth knowing for a Pi:** the display already does not need
-firmware. `vtgpu.h` drives virtio-gpu directly and Limine's framebuffer is
-only a fallback, so the display path on hardware without a UEFI GOP is a
-new driver in the same slot rather than a rework.
+**Cell counts are per-node, not universal.** `reg` is a list of address
+and size values whose widths come from the *parent's* `#address-cells`
+and `#size-cells`. On `virt` both are the 64-bit default, so reading a
+fixed 8-byte address happened to work. Under a Pi's `soc` node an address
+is one cell, and reading eight bytes returns the address with the size
+welded onto the end of it.
+
+**Bus addresses are not CPU addresses.** A Pi describes its peripherals at
+`0x7e000000`, which is what the VideoCore sees; the ARM core reaches the
+identical registers at `0xfe000000`. The `ranges` property on each
+intervening node is the translation, and a kernel that ignores it programs
+a device that is not there. The Pi 4 has three such buses — `soc`,
+`emmc2bus` and `scb` — with different cell counts each.
+
+Lookups are also by `compatible` alone now, never by node name. A Pi's
+UART node is `serial@7e201000` and its interrupt controller is
+`interrupt-controller@40041000`; neither string should have to appear in
+a kernel.
+
+`make test` runs the parser on the host against two blobs: the
+`bcm2711-rpi-4-b.dtb` the Raspberry Pi firmware actually ships, and one
+dumped from qemu. The expected addresses are what `dtc` prints for those
+nodes worked through the `ranges` translation by hand, not this parser's
+own output written down afterwards. All seventeen checks pass, including
+`0x7e201000 -> 0xfe201000`, `0x40041000 -> 0xff841000`,
+`0x7e340000 -> 0xfe340000` and `0x7d580000 -> 0xfd580000`.
+
+Getting the tree at all under qemu needs `-M virt,acpi=off` — EDK2 hands
+the OS either ACPI tables or a device tree and deliberately removes the
+DTB when ACPI is present. `DTB=1 tools/arm_run.py` sets it, and with it
+the kernel identifies the machine, extracts every address from the tree,
+builds its device mapping from those, and boots to the desktop.
+
+### The memory map is now derived, not assumed
+
+The mapper used to hard-code one window — `0x08000000` to `0x0C000000`,
+which is where qemu keeps its devices — plus whole gigabytes of RAM up to
+a bound taken from the firmware. A Pi has nothing at `0x08000000` and its
+peripherals are at `0xFC000000`, sharing a gigabyte with real memory, so
+neither half of that survives.
+
+`mmio_map_init()` now classifies each gigabyte independently from two
+lists filled before it runs: what the firmware reports as backed, and what
+the device tree says holds registers. A gigabyte that is entirely RAM and
+holds no device becomes one 1 GB block; anything else is described 2 MB at
+a time, with device blocks taking precedence over RAM and everything else
+left **invalid**. That last part is the point — it is the general form of
+the fix for the hvf abort described below, and it means a Pi's
+peripherals cannot come up mapped as cacheable memory.
+
+### The Pi drivers — written, and not tested on hardware
+
+Three drivers, in the order they matter:
+
+- **`src/mbox.h`** — the VideoCore property mailbox. A Pi is a VideoCore
+  computer with an ARM core attached: the firmware owns the clocks, the
+  power rails and the display, and the ARM side asks for things. There is
+  no register that sets the SD card clock, only a message requesting it.
+- **`src/pifb.h`** — a framebuffer from the firmware, eight tags in one
+  message. This is the display path that depends on no UEFI graphics
+  protocol at all.
+- **`src/emmc.h`** — the SD card, which on a Pi *is* the disk. SDHCI,
+  polled, with the full CMD0/CMD8/ACMD41/CMD2/CMD3/CMD9/CMD7/ACMD6
+  bring-up and both CSD versions for capacity.
+- **`src/genet.h`** — the Pi 4's on-SoC gigabit MAC. Descriptor rings in
+  the controller's own SRAM, buffers in host memory with explicit cache
+  maintenance, since DMA here is not coherent the way x86's is.
+
+They are wired in behind the same interfaces everything else uses:
+`src/blk.h` dispatches storage between virtio-blk and the SD card, and
+`e1000.h` dispatches the network between virtio-net and GENET. Both
+backends can never coexist — a Pi has no virtio and `virt` has no GENET —
+so the choice is made once at boot.
+
+**None of this has run on a Raspberry Pi.** There is not one here. What
+*is* verified is everything that decides whether those drivers are even
+reachable: the tree parses, the addresses resolve to the right physical
+numbers, the board is identified, and the mapping is built from what the
+firmware reports rather than from constants. The register sequences
+themselves come from the SD physical layer and SDHCI specifications and
+from the published GENET layout, and the places where a value is
+inference rather than specification are marked as such in the source
+rather than left to look like fact.
+
+The known gap worth naming: `genet.h` asserts a gigabit link rather than
+negotiating one, because it has no MDIO code and never talks to the PHY.
+On a Pi 4 the PHY auto-negotiates by itself and the MAC-to-PHY link is
+fixed, so that is right in the ordinary case — but against a 100 Mbit
+switch the two ends would disagree, and the symptom would be a link that
+passes no traffic rather than a slow one. MDIO is the next thing that
+file needs, and it needs hardware to write against.
 
 ## Things that cost a lot to learn
 
