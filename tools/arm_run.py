@@ -40,13 +40,18 @@ DISK = os.path.join(ROOT, "..", "Socrates BSD 9", "disk.img")
 # entry sends it to the UEFI shell instead of the disc the moment the
 # device set changes — which looks exactly like a kernel that failed to
 # load, and has cost this port an afternoon more than once.
+# Recreated every time, not just when older than the ISO.
+#
+# EDK2 writes to this file while running, so it is always newer than the
+# ISO it recorded a boot entry for — which means an "is it stale?"
+# comparison on modification times can never be true, and a stale entry
+# sends the firmware to the UEFI shell instead of the disc. That looks
+# exactly like a kernel that failed to load. Nothing in the store is
+# worth keeping, so this just starts clean.
 VARS = os.path.join(ROOT, "build", "efi-vars.fd")
-ISO = os.path.join(ROOT, "os.iso")
-if (not os.path.exists(VARS) or
-        (os.path.exists(ISO) and os.path.getmtime(VARS) < os.path.getmtime(ISO))):
-    os.makedirs(os.path.dirname(VARS), exist_ok=True)
-    with open(VARS, "wb") as fh:
-        fh.write(b"\0" * (64 << 20))
+os.makedirs(os.path.dirname(VARS), exist_ok=True)
+with open(VARS, "wb") as fh:
+    fh.write(b"\0" * (64 << 20))
 
 SER_PORT, QMP_PORT = 4481, 4480
 

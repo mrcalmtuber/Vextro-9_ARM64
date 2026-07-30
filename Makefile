@@ -59,7 +59,7 @@ FIRMWARE := /opt/homebrew/share/qemu/edk2-aarch64-code.fd
 
 RES ?= 1024x768x32
 
-.PHONY: all iso run clean test FORCE
+.PHONY: all iso run run-headless efi-vars clean test FORCE
 
 # The device tree parser is pure byte manipulation with no architecture
 # in it, so it can be tested on the host against blobs from real
@@ -228,20 +228,36 @@ endif
 # EDK2 keeps its variables in a second flash bank; it wants one the same
 # size as the code image even when empty.
 #
-# Regenerated whenever the ISO is, deliberately. EDK2 writes a boot entry
-# naming the exact PCI path it booted from, and a stale one sends it to
-# the UEFI shell instead of the disc the moment anything about the device
-# set changes — which looks exactly like a kernel that failed to load.
-build/efi-vars.fd: os.iso
+# Recreated on every run, and *not* as a target with the ISO as its
+# prerequisite, which is what this used to be.
+#
+# EDK2 writes a boot entry naming the exact device path it booted from,
+# and a stale one sends the firmware to the UEFI shell instead of the disc
+# the moment anything about the device set changes — which looks exactly
+# like a kernel that failed to load. So it has to be discarded when the
+# ISO changes.
+#
+# The catch is that a `build/efi-vars.fd: os.iso` rule can never fire.
+# The firmware *writes to this file while running*, so it is always newer
+# than the ISO it recorded an entry for, and make therefore always
+# considers it up to date. The rule was self-defeating: it looked like it
+# handled the problem and could not, and `make run` eventually dropped
+# into the UEFI shell with no explanation.
+#
+# Nothing in this store is worth keeping — there are no boot entries to
+# preserve and no settings to lose — so recreating it unconditionally is
+# both correct and free.
+.PHONY: efi-vars
+efi-vars:
 	@mkdir -p build
-	dd if=/dev/zero of=$@ bs=1m count=64 2>/dev/null
+	@dd if=/dev/zero of=build/efi-vars.fd bs=1m count=64 2>/dev/null
 
-run: os.iso build/efi-vars.fd
+run: os.iso efi-vars
 	qemu-system-aarch64 $(QEMU_COMMON) -serial stdio
 
 # Headless, for the scripted harness: serial to a log, QMP for input and
 # screenshots. Same shape as the x86 tree's tools/qemu_drive.py workflow.
-run-headless: os.iso build/efi-vars.fd
+run-headless: os.iso efi-vars
 	qemu-system-aarch64 $(QEMU_COMMON) -display none \
 		-serial file:build/serial.log \
 		-qmp tcp:127.0.0.1:4480,server,nowait
