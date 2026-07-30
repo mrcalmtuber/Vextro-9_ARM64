@@ -1024,6 +1024,24 @@ void kmain(void) {
              * frame, so a slow frame does not make the clock lose time —
              * which is the drift the x86 side actually suffers from.
              */
+#ifdef INPUT_TRACE
+            /* Does a press reach the render loop at all, and where? The
+             * pointer moving proves only that positions arrive; buttons
+             * come through a different event type on the same queue. */
+            {
+                static uint8_t last_btn = 0;
+                if (mouse_buttons != last_btn) {
+                    serial_puts("[input] buttons ");
+                    serial_put_u64(mouse_buttons);
+                    serial_puts(" at ");
+                    serial_put_u64((uint64_t)mouse_x);
+                    serial_putc(',');
+                    serial_put_u64((uint64_t)mouse_y);
+                    serial_putc('\n');
+                    last_btn = mouse_buttons;
+                }
+            }
+#endif
             sys_ticks = (uint32_t)(timer_ms() * 60ULL / 1000ULL);
 
             desktop_render(backbuf, w, h, mouse_x, mouse_y, mouse_buttons);

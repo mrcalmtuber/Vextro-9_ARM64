@@ -258,6 +258,31 @@ static void vti_key_event(uint16_t code, uint32_t value) {
         kb_shift = (value != 0);
         return;
     }
+    /*
+     * Buttons before the release filter, not after.
+     *
+     * A key release types nothing, so the filter below is right for a
+     * keyboard — and mouse buttons arrive as key events on the tablet's
+     * queue, through this same function, where a release is the entire
+     * point. Discarding it left the button latched down forever.
+     *
+     * The symptom was odd enough to be worth recording: the pointer
+     * tracked perfectly, dock icons highlighted under it, and the first
+     * click after boot opened its window. Every click after that did
+     * nothing at all, because the desktop triggers on the press *edge*
+     * and the button never came back up to make another one. It reads
+     * as a dock that stops responding, not as a missing release.
+     */
+    if (code >= 128) {
+        if (code == BTN_LEFT)
+            mouse_buttons = (uint8_t)((mouse_buttons & ~1u) | (value ? 1u : 0u));
+        else if (code == BTN_RIGHT)
+            mouse_buttons = (uint8_t)((mouse_buttons & ~2u) | (value ? 2u : 0u));
+        else if (code == BTN_MIDDLE)
+            mouse_buttons = (uint8_t)((mouse_buttons & ~4u) | (value ? 4u : 0u));
+        return;
+    }
+
     if (value == 0) return;             /* releases produce no characters */
 
     switch (code) {
@@ -279,10 +304,6 @@ static void vti_key_event(uint16_t code, uint32_t value) {
         return;
     }
 
-    /* Mouse buttons arrive as key events on the tablet's event queue. */
-    if (code == BTN_LEFT)   { mouse_buttons = (uint8_t)((mouse_buttons & ~1u) | (value ? 1u : 0u)); }
-    if (code == BTN_RIGHT)  { mouse_buttons = (uint8_t)((mouse_buttons & ~2u) | (value ? 2u : 0u)); }
-    if (code == BTN_MIDDLE) { mouse_buttons = (uint8_t)((mouse_buttons & ~4u) | (value ? 4u : 0u)); }
 }
 
 /*
@@ -310,10 +331,38 @@ static void vti_drain(vti_dev_t *d) {
         uint32_t slot = e->id;
         if (slot >= VTI_EVENTS) continue;
 
+        /*
+         * The device wrote this buffer; see all of it.
+         *
+         * Seeing the used-ring index advance and reading the event it
+         * points at are two loads with nothing ordering them, and this
+         * architecture is free to satisfy the second from before the
+         * first. The network driver has carried this barrier since it was
+         * written; this one never did, because the failure does not look
+         * like a memory-ordering bug.
+         *
+         * What it looked like: the pointer tracked perfectly and hover
+         * highlighted dock icons, but clicking did nothing. A button is
+         * an EV_KEY whose `value` says pressed or released, so a stale
+         * read leaves the *release* carrying the press's value — the
+         * button latches down and never comes up. The first click after
+         * boot works and no click after it ever produces a press edge
+         * again, which reads as a broken dock rather than a missing dmb.
+         */
+        DMB();
         struct virtio_input_event ev = d->ev[slot];
 
         switch (ev.type) {
         case EV_KEY:
+#ifdef INPUT_TRACE
+            if (ev.code >= 128) {
+                serial_puts("[ev] key code ");
+                serial_put_u64(ev.code);
+                serial_puts(" value ");
+                serial_put_u64(ev.value);
+                serial_putc('\n');
+            }
+#endif
             vti_key_event(ev.code, ev.value);
             break;
         case EV_ABS:

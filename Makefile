@@ -57,7 +57,28 @@ ISO    := iso_root
 # the ISO is UEFI-only.
 FIRMWARE := /opt/homebrew/share/qemu/edk2-aarch64-code.fd
 
-RES ?= 1024x768x32
+RES ?= 1280x800x32
+
+# The display device the kernel actually drives.
+#
+# ramfb is what the port started on and it is a dead end for anything
+# interactive: EDK2's driver offers three modes topping out at 1024x768,
+# and asking for more does not degrade to the next one, it drops to
+# 800x600. virtio-gpu has no mode table — the kernel asks the device for
+# the size it wants and gets it, which is how this reaches the same
+# 1280x800 the x86 build uses by default.
+#
+# ramfb remains available for the headless harness, where the resolution
+# does not matter and the extra device does not earn its place:
+#     make run GPU=ramfb
+RES_W := $(word 1,$(subst x, ,$(RES)))
+RES_H := $(word 2,$(subst x, ,$(RES)))
+GPU   ?= virtio
+ifeq ($(GPU),ramfb)
+QEMU_GPU := -device ramfb
+else
+QEMU_GPU := -device virtio-gpu-device,xres=$(RES_W),yres=$(RES_H)
+endif
 
 .PHONY: all iso run run-headless efi-vars clean test FORCE
 
@@ -205,10 +226,18 @@ endif
 # The tablet is absolute, which is why the x86 build's VMware backdoor
 # driver has no counterpart here — the pointer tracks the host cursor
 # without a grab, and there is nothing to calibrate.
-QEMU_COMMON := -M virt -m 2048 $(QEMU_CPU) -accel $(ACCEL) \
+# Deferred (`=`), not immediate (`:=`), and that one character matters.
+#
+# QEMU_NET and QEMU_DISK are defined *below* this line, so with immediate
+# expansion they were both empty when it was evaluated — and `make run`
+# had been starting the machine with no network adapter and no data disk
+# for as long as this target existed. Nothing said so: the kernel simply
+# reported no virtio-blk and no virtio-net, which looks exactly like a
+# machine that was meant to have neither.
+QEMU_COMMON = -M virt -m 2048 $(QEMU_CPU) -accel $(ACCEL) \
 	-drive if=pflash,format=raw,unit=0,readonly=on,file=$(FIRMWARE) \
 	-drive if=pflash,format=raw,unit=1,file=build/efi-vars.fd \
-	-device ramfb \
+	$(QEMU_GPU) \
 	-global virtio-mmio.force-legacy=false \
 	-device virtio-keyboard-device \
 	-device virtio-tablet-device \
@@ -232,8 +261,19 @@ QEMU_NET := -netdev user,id=n0 -device virtio-net-device,netdev=n0
 # changes.
 DISK    ?= ../Socrates BSD 9/disk.img
 DISK_RO ?= on
-ifneq ($(wildcard $(DISK)),)
-QEMU_DISK := -drive if=none,id=d0,format=raw,readonly=$(DISK_RO),file=$(DISK) \
+
+# $(wildcard) cannot be used here, and the reason is a trap worth naming:
+# it splits its argument on whitespace and the default path has spaces in
+# it, so `$(wildcard ../Socrates BSD 9/disk.img)` looks for three separate
+# files, matches none, and quietly decides there is no disk. `make run`
+# therefore booted with no volume at all — no exFAT, no saved keycode, no
+# encyclopedia, no model — while the headless harness, which is Python and
+# does its own test, found the same file without trouble.
+#
+# The path is quoted everywhere it reaches a shell for the same reason.
+DISK_PRESENT := $(shell test -f "$(DISK)" && echo yes)
+ifeq ($(DISK_PRESENT),yes)
+QEMU_DISK := -drive if=none,id=d0,format=raw,readonly=$(DISK_RO),file="$(DISK)" \
 	-device virtio-blk-device,drive=d0
 else
 QEMU_DISK :=
@@ -266,8 +306,35 @@ efi-vars:
 	@mkdir -p build
 	@dd if=/dev/zero of=build/efi-vars.fd bs=1m count=64 2>/dev/null
 
+# Not every QEMU is built with the same display backends: Homebrew's
+# macOS build ships Cocoa and no SDL, most Linux builds have GTK and SDL.
+# Ask this one what it has rather than hard-coding a backend, and only
+# pass sub-options the chosen backend accepts — QEMU rejects the whole
+# option if it does not know one of them.
+#
+# zoom-to-fit matters more than it sounds: without it, Cocoa and GTK draw
+# the guest at 1:1 in the middle of the full-screen window and surround it
+# with black, which looks exactly like a desktop that refuses to resize.
+QEMU_DISPLAY := $(shell d=$$(qemu-system-aarch64 -display help 2>/dev/null); \
+  if   echo "$$d" | grep -qx sdl;   then echo 'sdl,show-cursor=off,grab-mod=lshift-lctrl-lalt'; \
+  elif echo "$$d" | grep -qx gtk;   then echo 'gtk,show-cursor=off,grab-on-hover=on,zoom-to-fit=on'; \
+  elif echo "$$d" | grep -qx cocoa; then echo 'cocoa,show-cursor=off,zoom-to-fit=on'; \
+  else echo none; fi)
+
+# (a shell `case` cannot be used here: the ")" in its patterns would
+# close make's own $(shell ...) expansion early)
+QEMU_FSKEY := $(if $(findstring cocoa,$(QEMU_DISPLAY)),Ctrl + Cmd + F,Ctrl + Alt + F)
+
 run: os.iso efi-vars
-	qemu-system-aarch64 $(QEMU_COMMON) -serial stdio
+	@echo ""
+	@echo "  [TIP] Toggle full-screen on/off at any time with: $(QEMU_FSKEY)"
+	@echo "  [TIP] The pointer is absolute — just move it, no click to grab."
+	@echo "  [TIP] The keycode for the shared disk.img is: exfat"
+	@echo ""
+	qemu-system-aarch64 $(QEMU_COMMON) \
+		-display $(QEMU_DISPLAY) \
+		-full-screen \
+		-serial stdio
 
 # Headless, for the scripted harness: serial to a log, QMP for input and
 # screenshots. Same shape as the x86 tree's tools/qemu_drive.py workflow.
