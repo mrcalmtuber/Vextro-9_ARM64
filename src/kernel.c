@@ -416,6 +416,25 @@ static void display_boot_animation(volatile uint32_t *vram,
     vga_flip(vram, scr_w, scr_h, pitch_px);
 }
 
+/*
+ * What applications may borrow from the kernel.
+ *
+ * Defined here rather than in bsdload.h because that header is included
+ * before ttf.h and gfx.h, so none of these names exist yet at that point.
+ * The loader holds a pointer and this fills it in once everything is
+ * declared.
+ *
+ * The rasteriser is the reason the mechanism exists: it is the one engine
+ * large enough that statically linking it into every application would be
+ * absurd, and the one an application is most likely to want.
+ */
+static const bsd_export_t kernel_exports[] = {
+    { "ttf_draw_string", (uint64_t)(uintptr_t)ttf_draw_string },
+    { "ttf_text_width",  (uint64_t)(uintptr_t)ttf_text_width  },
+    { "gfx_rect",        (uint64_t)(uintptr_t)gfx_rect        },
+    { 0, 0 }
+};
+
 void kmain(void) {
 #ifdef BAREMIN
     /*
@@ -462,6 +481,7 @@ void kmain(void) {
     const void *dtb = dtb_request.response ? dtb_request.response->dtb_ptr : 0;
     fdt_discover(dtb);
 
+    bsd_set_exports(kernel_exports);
     app_region_init();
     mmio_map_init();
 

@@ -26,8 +26,74 @@
 
 /* The window's backing store. 2 MB-aligned so a single block descriptor
  * can map it; see mmio_map_init(). */
+
 static uint8_t app_region[APP_WINDOW_SIZE]
     __attribute__((aligned(APP_WINDOW_SIZE)));
+
+/* ===== import resolution =====
+ *
+ * Set by the kernel once everything it exports has been declared —
+ * bsdload.h is included before ttf.h, so the table cannot be built here.
+ */
+static const bsd_export_t *bsd_exports = 0;
+
+static void bsd_set_exports(const bsd_export_t *table) { bsd_exports = table; }
+
+static int bsd_name_eq(const char *a, const char *b) {
+    for (int i = 0; i < BSD_IMPORT_NAMELEN; i++) {
+        if (a[i] != b[i]) return 0;
+        if (a[i] == '\0') return 1;
+    }
+    return 1;                       /* full-width name, no terminator */
+}
+
+/*
+ * Find the import table in a loaded data segment and fill it in.
+ *
+ * `data` points at the image's data as mapped, `len` bounds it. The tag
+ * is searched for on eight-byte boundaries because the structure is
+ * eight-aligned by construction; scanning bytewise would find a tag that
+ * happened to straddle two unrelated values.
+ *
+ * Returns the number of names resolved, or -1 if the table is malformed.
+ * An image with no table at all is not an error — that is every image
+ * that existed before this — so it returns zero.
+ */
+static int bsd_resolve_imports(uint8_t *data, uint64_t len) {
+    if (!data || len < sizeof(bsd_import_hdr_t)) return 0;
+
+    uint64_t limit = len - sizeof(bsd_import_hdr_t);
+    for (uint64_t off = 0; off <= limit; off += 8) {
+        bsd_import_hdr_t *hdr = (bsd_import_hdr_t *)(data + off);
+        if (hdr->magic != BSD_IMPORT_MAGIC) continue;
+
+        if (hdr->count == 0 || hdr->count > BSD_IMPORT_MAX) return -1;
+
+        /* The entries must lie wholly inside the segment. A count that
+         * overruns is the one way this can be turned into a write past
+         * the image, so it is checked before anything is written. */
+        uint64_t need = sizeof(bsd_import_hdr_t) +
+                        (uint64_t)hdr->count * sizeof(bsd_import_t);
+        if (need > len - off) return -1;
+
+        bsd_import_t *e = (bsd_import_t *)(data + off + sizeof(bsd_import_hdr_t));
+        int found = 0;
+        for (uint32_t i = 0; i < hdr->count; i++) {
+            e[i].addr = 0;
+            if (!bsd_exports) continue;
+            for (int k = 0; bsd_exports[k].name; k++) {
+                if (bsd_name_eq(e[i].name, bsd_exports[k].name)) {
+                    e[i].addr = bsd_exports[k].addr;
+                    found++;
+                    break;
+                }
+            }
+        }
+        return found;
+    }
+    return 0;                       /* no table: an ordinary image */
+}
+
 
 static const char *app_err = "";
 
@@ -75,6 +141,39 @@ static int bsd_exec(const uint8_t *file, uint64_t len) {
         uint64_t doff = h->data_vaddr - h->text_vaddr;
         for (uint64_t i = 0; i < h->data_size; i++)
             base[doff + i] = file[h->data_off + i];
+
+    }
+
+    /*
+     * Fill in whatever the image asked to borrow from the kernel.
+     *
+     * The whole loaded span is searched, not just the data segment. An
+     * application with nothing mutable has no data segment at all — the
+     * demo here is one, `data_size` is zero and its import table lands in
+     * .rodata, which the application linker folds into text. Since the
+     * table has to be found by searching anyway, searching all of it
+     * removes a dependency on which section a compiler chose.
+     *
+     * That this can write into the text image is specific to how this
+     * kernel maps applications: one window, readable, writable and
+     * executable together, because the .bsd format carries no relocations
+     * and needs no separate protections. The POSIX loader in bsdfmt does
+     * enforce W^X per segment, so an image meant to run under both must
+     * put its table somewhere writable there.
+     *
+     * Before the cache maintenance below, deliberately: these writes go
+     * through the data mapping and the clean-to-unification that follows
+     * is what makes them visible to the fetch side.
+     */
+    int nimp = bsd_resolve_imports(base, span);
+    if (nimp < 0) {
+        serial_puts("[socrates/arm64] .bsd: malformed import table\n");
+        return -1;
+    }
+    if (nimp > 0) {
+        serial_puts("[socrates/arm64] .bsd: resolved ");
+        serial_put_u64((uint64_t)nimp);
+        serial_puts(" imported symbols\n");
     }
 
     uint64_t entry = APP_WINDOW_VA + (h->entry - h->text_vaddr);
@@ -102,5 +201,6 @@ static int bsd_exec(const uint8_t *file, uint64_t len) {
     app_running = 0;
     return 0;
 }
+
 
 #endif /* BSDLOAD_H */
