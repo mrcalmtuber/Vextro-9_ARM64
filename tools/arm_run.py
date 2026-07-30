@@ -22,6 +22,7 @@ Why this exists rather than `make run`:
 
 Usage: tools/arm_run.py [seconds] [hvf|tcg]
 """
+import atexit
 import json
 import os
 import socket
@@ -97,6 +98,25 @@ cmd = [
 ]
 
 proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+
+# A leaked QEMU is not a harmless stray process. It holds an exclusive lock
+# on the data disk, and that disk lives in the *x86* tree -- so a harness run
+# that exits without reaping its child makes `make run` over there fail with
+# `Failed to get "write" lock`, a message that points at the wrong tree
+# entirely and reads like disk corruption. One escaped this way and spun at
+# 100% CPU for over an hour before anyone noticed.
+#
+# The orderly shutdown at the bottom of this script only runs when the script
+# reaches the bottom. This covers the paths that do not: the early exit when
+# serial never comes up, and any exception in between.
+def reap():
+    if proc.poll() is None:
+        proc.kill()
+        proc.wait()
+
+
+atexit.register(reap)
 
 
 def connect(port, tries=50):

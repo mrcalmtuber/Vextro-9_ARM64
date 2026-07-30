@@ -10,6 +10,7 @@ test the port plan calls for.
 
 Usage: tools/arm_shot.py [seconds-before-capture] [out.ppm] [hvf|tcg]
 """
+import atexit
 import json
 import os
 import socket
@@ -63,6 +64,19 @@ proc = subprocess.Popen([
     "-serial", f"file:{ROOT}/build/shot-serial.log",
     "-qmp", f"tcp:127.0.0.1:{QMP_PORT},server,nowait",
 ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+
+# See the note in arm_run.py: a headless QEMU that outlives this script keeps
+# a lock on the data disk, which lives in the x86 tree, and breaks `make run`
+# over there with an error naming neither this script nor this tree. The
+# create_connection below raises on timeout, so this is not a hypothetical.
+def reap():
+    if proc.poll() is None:
+        proc.kill()
+        proc.wait()
+
+
+atexit.register(reap)
 
 time.sleep(2)
 sock = socket.create_connection(("127.0.0.1", QMP_PORT), timeout=10)
