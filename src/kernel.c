@@ -550,6 +550,19 @@ void kmain(void) {
          * FAT32 branch of a filesystem that is not FAT32, and everything
          * reports "file not found". */
         fs_mount();
+
+        /*
+         * Start pulling the model in, if one is on the volume.
+         *
+         * The x86 tree does this and this one never did — so the chat
+         * panel here only worked after somebody typed `llm load` by hand,
+         * and the Wikipedia window's subtitle offered to answer questions
+         * against weights that were never going to arrive. The work
+         * itself happens in the render loop, a slice of a frame at a
+         * time, so this only opens the file.
+         */
+        ai_autoload_start();
+
         serial_puts("[socrates/arm64] exFAT: ");
         if (exf_vol.mounted) {
             serial_puts("mounted, ");
@@ -865,6 +878,7 @@ void kmain(void) {
     int net_selftest_sent = 0, net_selftest_seen = 0;
     int desktop_mode = 0;
     int auto_browser_done = 0;
+    int auto_ask_done = 0;
     int net_fetch_started = 0, net_fetch_reported = 0;
 
 
@@ -990,6 +1004,28 @@ void kmain(void) {
                 desktop_wheel_input(wheel);
             }
 
+            /*
+             * The portable code's 60 Hz tick, which nothing on this tree
+             * was providing.
+             *
+             * `sys_ticks` lives in gfx.h and the x86 kernel gets it free:
+             * its PIT interrupt increments it sixty times a second. This
+             * port has no timer interrupt at all — the render loop paces
+             * itself against the architected counter, which was the right
+             * design and left a counter that everything above still reads
+             * sitting at zero forever.
+             *
+             * The visible result was a menu bar clock that drew once at
+             * boot and then never changed, because it only recomputes the
+             * time when `sys_ticks` has advanced thirty. A machine that
+             * had been up for an hour still said the minute it started.
+             *
+             * Derived from real elapsed time rather than counted per
+             * frame, so a slow frame does not make the clock lose time —
+             * which is the drift the x86 side actually suffers from.
+             */
+            sys_ticks = (uint32_t)(timer_ms() * 60ULL / 1000ULL);
+
             desktop_render(backbuf, w, h, mouse_x, mouse_y, mouse_buttons);
 
 #ifdef AUTO_BROWSER
@@ -1013,6 +1049,27 @@ void kmain(void) {
                 wm_open(WK_BROWSER);
                 brw_navigate("http://example.com/");
                 serial_puts("[socrates/arm64] desktop: browser opened on example.com\n");
+            }
+#endif
+#ifdef AUTO_ASK
+            /*
+             * Put one question to the chat engine, for the harness.
+             *
+             * The same reasoning as AUTO_BROWSER above: reaching the chat
+             * panel with a pointer means clicking a dock icon and then a
+             * bubble whose positions depend on the panel size, so a
+             * coordinate-driven test mostly tests the layout. This uses
+             * the entry point the shell's `ask` uses.
+             *
+             * Waiting for the weights is the point of the second
+             * condition — asking before they are resident is answered,
+             * correctly, with "no model", which would make this test pass
+             * while proving nothing.
+             */
+            if (!auto_ask_done && llm_weights_loaded()) {
+                auto_ask_done = 1;
+                wm_open(WK_WIKI);
+                wiki_ask(AUTO_ASK);
             }
 #endif
             draw_cursor(w, h);

@@ -203,6 +203,34 @@ static uint64_t timer_ms(void) {
 }
 
 /*
+ * Time budgets, for work too big to finish inside one frame.
+ *
+ * Reading a 400 MB model off the disk, or running a transformer over a
+ * retrieved article, cannot be done in a frame and cannot be paced by a
+ * fixed number of pieces either: too many blows the frame's deadline, too
+ * few means the work never finishes. The right count depends on how fast
+ * the machine is, which is exactly what a count cannot express — so the
+ * caller states a slice of time instead.
+ *
+ * The names match the x86 tree's, which spells them with rdtsc and a
+ * calibrated PIT. Here the architected counter already reports its own
+ * frequency, so there is nothing to calibrate. Sharing the names is what
+ * lets apps.h and term.h stay byte-identical across the two trees.
+ */
+static inline uint64_t cycle_now(void) { return timer_count(); }
+
+static inline int budget_expired_ms(uint64_t start, uint32_t ms) {
+    uint64_t hz = timer_hz();
+    return (timer_count() - start) >= (hz / 1000ULL) * (uint64_t)ms;
+}
+
+/* For reporting an elapsed span. */
+static inline uint32_t cycles_to_ms(uint64_t cycles) {
+    uint64_t per_ms = timer_hz() / 1000ULL;
+    return per_ms ? (uint32_t)(cycles / per_ms) : 0;
+}
+
+/*
  * Spin until `until` on the raw counter, parking the core between checks.
  *
  * Bounded deliberately. A wait that can never finish — a target computed

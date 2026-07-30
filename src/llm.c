@@ -1079,7 +1079,7 @@ int llm_load_step(const char **err) {
     if (!load_active) { *err = "no load in progress"; return -1; }
 
     if (load_done < weights_len) {
-        uint32_t chunk = 1u << 20;
+        uint32_t chunk = 128u << 10;
         if (load_done + chunk > weights_len)
             chunk = (uint32_t)(weights_len - load_done);
         uint32_t got = 0;
@@ -1310,7 +1310,23 @@ static void eval_layer(uint32_t l, int pos) {
     for (uint32_t i = 0; i < E; i++) a_x[i] += a_xb2[i];
 }
 
-int llm_eval_begin(int32_t token, int pos) {
+/*
+ * `want_logits` is the difference between reading a prompt and answering.
+ *
+ * Feeding a prompt in exists to fill the key/value cache; the layers do
+ * that, and the logit head — a dot product against all 151,936 rows of
+ * the embedding matrix — is only needed to *choose* a token. For every
+ * prompt token but the last, those logits are computed and discarded.
+ *
+ * That is not a small waste. The head is roughly three fifths of the work
+ * per token, so skipping it where it cannot be read makes reading a
+ * retrieved article about two and a half times faster, which on this
+ * platform is the difference between a usable chat panel and one nobody
+ * waits for.
+ */
+static int ev_want_logits = 1;
+
+static int eval_begin_common(int32_t token, int pos, int want_logits) {
     if (!weights_ok) return -1;
     if (pos < 0 || pos >= n_ctx) return -1;
     if (token < 0 || (uint32_t)token >= info.n_vocab) return -1;
@@ -1323,8 +1339,19 @@ int llm_eval_begin(int32_t token, int pos) {
     ev_layer = 0;
     ev_stage = 0;
     ev_logit_row = 0;
+    ev_want_logits = want_logits;
     ev_active = 1;
     return 0;
+}
+
+int llm_eval_begin(int32_t token, int pos) {
+    return eval_begin_common(token, pos, 1);
+}
+
+/* Same forward pass, stopping once the cache is filled. llm_argmax() is
+ * meaningless afterwards and the caller must not read it. */
+int llm_eval_begin_prefill(int32_t token, int pos) {
+    return eval_begin_common(token, pos, 0);
 }
 
 /* Returns 1 once the logits are ready, 0 while there is more to do. */
@@ -1335,6 +1362,11 @@ int llm_eval_step(void) {
         eval_layer(ev_layer, ev_pos);
         if (++ev_layer >= info.n_layer) {
             rmsnorm(a_x, a_x, &w_out_norm, info.n_embd);
+            if (!ev_want_logits) {      /* prefill: the cache is what mattered */
+                ev_active = 0;
+                ev_stage = 2;
+                return 1;
+            }
             ev_stage = 1;
         }
         return 0;
