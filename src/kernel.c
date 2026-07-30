@@ -118,6 +118,8 @@ int memcmp(const void *a, const void *b, size_t n) {
 static uint32_t backbuf[BUF_MAX_W * BUF_MAX_H];
 static uint32_t prevbuf[BUF_MAX_W * BUF_MAX_H];
 static int      prev_valid = 0;
+static uint64_t present_px = 0;      /* pixels handed to the scanout   */
+static uint32_t present_n  = 0;      /* frames counted                 */
 
 #define COLOR_BLACK 0x000000u
 #define COLOR_GOLD  0xD4AF37u
@@ -276,32 +278,55 @@ uint64_t arm_syscall(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2) {
         }                                                             \
     } while (0)
 
-/*
- * Present the back buffer.
- *
- * Carries over the x86 build's row-skipping: comparing two rows in RAM
- * is far cheaper than writing one to the panel, and on a mostly-still
- * screen almost every row is unchanged.
- */
-static int row_same(const uint32_t *a, const uint32_t *b, uint32_t n) {
-    for (uint32_t i = 0; i < n; i++)
-        if (a[i] != b[i]) return 0;
-    return 1;
-}
 
+/*
+ * Push the back buffer at the panel, touching as little as possible.
+ *
+ * Three things happen in one pass, and folding them together is the
+ * point: finding what changed, copying it, and recording where it was.
+ *
+ * The row scan used to answer only "is this row identical?" and then
+ * copy the whole row if not. A moving pointer changes twelve pixels of a
+ * 1280-wide row, so that copied a hundred times more than it needed to —
+ * and, worse, it learned nothing it could pass on. Scanning inward from
+ * both ends of the row costs the same comparisons, copies only the span
+ * between them, and yields a bounding box for free.
+ *
+ * That box is what makes the difference on virtio-gpu, where presenting
+ * is an explicit transfer of guest pixels into the host's copy of the
+ * resource followed by a flush. Handing it the whole screen every frame
+ * means moving four megabytes to show a cursor that moved four pixels.
+ */
 static void vga_flip(volatile uint32_t *vram,
                      uint32_t w, uint32_t h, uint32_t pitch_px) {
+    uint32_t y0 = h, y1 = 0, x0 = w, x1 = 0;    /* dirty bounding box */
+
     for (uint32_t row = 0; row < h; row++) {
         const uint32_t *src = backbuf + row * w;
         uint32_t       *cmp = prevbuf + row * w;
-        if (prev_valid && row_same(src, cmp, w)) continue;
+
+        uint32_t c0 = 0, c1 = w;
+        if (prev_valid) {
+            while (c0 < w && src[c0] == cmp[c0]) c0++;
+            if (c0 == w) continue;                  /* row unchanged */
+            while (c1 > c0 && src[c1 - 1] == cmp[c1 - 1]) c1--;
+        }
+
         volatile uint32_t *dst = vram + row * pitch_px;
-        for (uint32_t col = 0; col < w; col++) {
+        for (uint32_t col = c0; col < c1; col++) {
             dst[col] = src[col];
             cmp[col] = src[col];
         }
+
+        if (row < y0) y0 = row;
+        if (row + 1 > y1) y1 = row + 1;
+        if (c0 < x0) x0 = c0;
+        if (c1 > x1) x1 = c1;
     }
     prev_valid = 1;
+
+    if (y1 <= y0) return;              /* nothing moved; nothing to show */
+
     /* the panel is device memory; make sure the writes have left */
     DSB();
 
@@ -310,9 +335,16 @@ static void vga_flip(volatile uint32_t *vram,
      * virtio-gpu resource is not: the guest's pixels have to be
      * transferred into the host's copy and that copy flushed to the
      * display, so presenting is an explicit step rather than a
-     * consequence of storing.
+     * consequence of storing — and it is charged by area, which is why
+     * it is handed the box rather than the screen.
      */
-    if (vgpu_ready) vtgpu_present(0, 0, w, h);
+    /* What the boundary actually costs, as a share of the screen. A
+     * scanout transfer is charged by area, so this is the number that
+     * says whether the dirty box is earning its keep. */
+    present_px += (uint64_t)(x1 - x0) * (y1 - y0);
+    present_n++;
+
+    if (vgpu_ready) vtgpu_present(x0, y0, x1 - x0, y1 - y0);
 }
 
 static void fill_rect(uint32_t w, uint32_t x, uint32_t y,
@@ -1095,6 +1127,14 @@ void kmain(void) {
             CHK(5);
 
             frames++;
+            if (frames % 120 == 0 && present_n) {
+                serial_puts("[socrates/arm64] scanout: ");
+                serial_put_u64(present_px / present_n);
+                serial_puts(" px/frame of ");
+                serial_put_u64((uint64_t)w * h);
+                serial_puts("\n");
+                present_px = 0; present_n = 0;
+            }
             if (frames % 120 == 0) {
                 uint64_t now = timer_ms();
                 uint64_t ms  = now - last_report_ms;

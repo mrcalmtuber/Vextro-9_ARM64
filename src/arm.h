@@ -224,6 +224,12 @@ static inline int budget_expired_ms(uint64_t start, uint32_t ms) {
     return (timer_count() - start) >= (hz / 1000ULL) * (uint64_t)ms;
 }
 
+/* Microseconds, for spans a millisecond cannot resolve. */
+static inline uint32_t cycles_to_us(uint64_t cycles) {
+    uint64_t per_us = timer_hz() / 1000000ULL;
+    return per_us ? (uint32_t)(cycles / per_us) : 0;
+}
+
 /* For reporting an elapsed span. */
 static inline uint32_t cycles_to_ms(uint64_t cycles) {
     uint64_t per_ms = timer_hz() / 1000ULL;

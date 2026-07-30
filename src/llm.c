@@ -787,6 +787,103 @@ static void k4_scale_min(int j, const uint8_t *q, uint8_t *d, uint8_t *m) {
     }
 }
 
+
+/*
+ * ---- NEON weight unpacking (aarch64 only) ----
+ *
+ * `llm bench` on this model reports two milliseconds to dequantise its
+ * largest weight and under one to multiply by it: expanding quantised
+ * weights *is* inference time here, and the arithmetic around it is
+ * effectively free. So this is the one place in the kernel where hand
+ * vectorisation is worth its cost, and the scalar dot product beside it
+ * deliberately is not.
+ *
+ * Q5_0 and Q8_0 are the two that are implemented, and that is a measured
+ * choice rather than a convenient one: across this model's 493 million
+ * weights they account for 51.0% and 27.8% of the elements — 78.8%
+ * between them — while Q4_K and Q6_K are 10.6% each. Their block layouts
+ * are also the two that unpack without a per-sub-block scale lookup,
+ * which is what makes them expressible as straight-line vector code.
+ *
+ * What it bought, measured rather than assumed: with -O3, almost
+ * nothing. A/B on the same tensor put dequantisation at 1 ms scalar
+ * against 0 ms vectorised, and the fused kernel the model actually runs
+ * at 3 ms either way; end to end, 11.6 s against 11.8-12.4 s, inside the
+ * run-to-run spread. GCC already vectorises these loops, and it can:
+ * they are elementwise, so unlike the dot product beside them they need
+ * no permission to reassociate anything.
+ *
+ * It is kept because "the compiler happens to do it at -O3" is not a
+ * guarantee — at -O2, on another toolchain, or with a differently shaped
+ * loop it silently reverts to scalar, and this is the hottest code in the
+ * system. -DNO_NEON_DEQUANT selects the scalar path, which is how the
+ * comparison above was made and how it can be made again.
+ *
+ * The rest of the kernel keeps -mgeneral-regs-only; this translation
+ * unit is already the single exception, built without it, which is why
+ * arm_neon.h may be included at all.
+ */
+#if defined(__aarch64__) && !defined(NO_NEON_DEQUANT)
+#include <arm_neon.h>
+
+/* Widen sixteen signed bytes to sixteen floats, scale, store. Shared by
+ * both paths below: the unpacking differs, the tail never does. */
+static inline void neon_store16_scaled(float *out, int8x16_t q, float32x4_t vd) {
+    int16x8_t lo = vmovl_s8(vget_low_s8(q));
+    int16x8_t hi = vmovl_s8(vget_high_s8(q));
+    vst1q_f32(out +  0, vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16(lo))),  vd));
+    vst1q_f32(out +  4, vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_high_s16(lo))), vd));
+    vst1q_f32(out +  8, vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16(hi))),  vd));
+    vst1q_f32(out + 12, vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_high_s16(hi))), vd));
+}
+
+/* Q8_0: one fp16 scale, then thirty-two signed bytes. */
+static inline void neon_dequant_q8_0(const uint8_t *b, float *out) {
+    float32x4_t vd = vdupq_n_f32(fp16_to_f32((uint16_t)(b[0] | (b[1] << 8))));
+    const int8_t *qs = (const int8_t *)(b + 2);
+    neon_store16_scaled(out +  0, vld1q_s8(qs +  0), vd);
+    neon_store16_scaled(out + 16, vld1q_s8(qs + 16), vd);
+}
+
+/*
+ * Q5_0: a scale, a 32-bit plane of fifth bits, then sixteen packed bytes
+ * holding the low four bits of all thirty-two values.
+ *
+ * The fifth bits are the awkward part. Element j takes bit j of `qh` and
+ * element j+16 takes bit j+16, so each lane needs a *different* bit of
+ * one scalar. A byte lane cannot shift right by more than seven, so the
+ * source vector is built from the right byte of qh per half — lanes 0..7
+ * from one byte, lanes 8..15 from the next — and a constant vector of
+ * per-lane shifts brings the wanted bit down to position zero.
+ */
+static inline void neon_dequant_q5_0(const uint8_t *b, float *out) {
+    static const int8_t sh[16] = { 0,-1,-2,-3,-4,-5,-6,-7,
+                                   0,-1,-2,-3,-4,-5,-6,-7 };
+    float32x4_t vd = vdupq_n_f32(fp16_to_f32((uint16_t)(b[0] | (b[1] << 8))));
+    uint32_t qh = (uint32_t)b[2] | ((uint32_t)b[3] << 8) |
+                  ((uint32_t)b[4] << 16) | ((uint32_t)b[5] << 24);
+
+    uint8x16_t packed = vld1q_u8(b + 6);
+    int8x16_t  vsh    = vld1q_s8(sh);
+    uint8x16_t one    = vdupq_n_u8(1);
+    int8x16_t  bias   = vdupq_n_s8(16);
+
+    /* elements 0..15: low nibbles, fifth bit from qh bits 0..15 */
+    uint8x16_t src_lo = vcombine_u8(vdup_n_u8((uint8_t)(qh      )),
+                                    vdup_n_u8((uint8_t)(qh >>  8)));
+    uint8x16_t h_lo   = vshlq_n_u8(vandq_u8(vshlq_u8(src_lo, vsh), one), 4);
+    uint8x16_t v_lo   = vorrq_u8(vandq_u8(packed, vdupq_n_u8(0x0F)), h_lo);
+    neon_store16_scaled(out, vsubq_s8(vreinterpretq_s8_u8(v_lo), bias), vd);
+
+    /* elements 16..31: high nibbles, fifth bit from qh bits 16..31 */
+    uint8x16_t src_hi = vcombine_u8(vdup_n_u8((uint8_t)(qh >> 16)),
+                                    vdup_n_u8((uint8_t)(qh >> 24)));
+    uint8x16_t h_hi   = vshlq_n_u8(vandq_u8(vshlq_u8(src_hi, vsh), one), 4);
+    uint8x16_t v_hi   = vorrq_u8(vshrq_n_u8(packed, 4), h_hi);
+    neon_store16_scaled(out + 16, vsubq_s8(vreinterpretq_s8_u8(v_hi), bias), vd);
+}
+#endif /* __aarch64__ */
+
 /* Expand one block into `out`; returns elements written, or -1. */
 static int dequant_block(uint32_t type, const uint8_t *b, float *out) {
     switch (type) {
@@ -802,6 +899,10 @@ static int dequant_block(uint32_t type, const uint8_t *b, float *out) {
         return 1;
 
     case 6: {                                   /* Q5_0: 32 elements */
+#if defined(__aarch64__) && !defined(NO_NEON_DEQUANT)
+        neon_dequant_q5_0(b, out);
+        return 32;
+#else
         float d = fp16_to_f32((uint16_t)(b[0] | (b[1] << 8)));
         uint32_t qh = (uint32_t)b[2] | ((uint32_t)b[3] << 8) |
                       ((uint32_t)b[4] << 16) | ((uint32_t)b[5] << 24);
@@ -813,11 +914,16 @@ static int dequant_block(uint32_t type, const uint8_t *b, float *out) {
             out[j + 16] = (float)(((qs[j] >> 4)   | h1) - 16) * d;
         }
         return 32;
+#endif
     }
     case 8: {                                   /* Q8_0: 32 elements */
+#if defined(__aarch64__) && !defined(NO_NEON_DEQUANT)
+        neon_dequant_q8_0(b, out);
+#else
         float d = fp16_to_f32((uint16_t)(b[0] | (b[1] << 8)));
         const int8_t *qs = (const int8_t *)(b + 2);
         for (int j = 0; j < 32; j++) out[j] = (float)qs[j] * d;
+#endif
         return 32;
     }
 
@@ -1681,7 +1787,10 @@ void llm_bench(uint64_t *deq_cy, uint64_t *dot_cy, uint64_t *both_cy) {
     if (both_cy) *both_cy = 0;
     if (!weights_ok) return;
 
-    const wt_t *w = &w_layers[0].w_down;
+    /* ffn_up, not ffn_down: this model stores it Q5_0, which is 51% of
+     * all its weights and the type the vector path actually covers.
+     * Benchmarking a Q6_K tensor would measure the scalar fallback. */
+    const wt_t *w = &w_layers[0].w_up;
     static float x[8192];
     static float out[8192];
     static float row[8192];
