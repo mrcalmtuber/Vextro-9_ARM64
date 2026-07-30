@@ -125,9 +125,23 @@ build/hello_bsd_data.o: src/hello_bsd_data.S build/hello.bsd
 # is the one file the x86 tree builds without -mno-sse. Porting it needed
 # a single line: an SSE sqrtss became FSQRT, which aarch64 has in its base
 # instruction set.
-LLM_CFLAGS := -O2 -Wall -Wextra -ffreestanding -fno-stack-protector \
-              -fno-stack-check -fno-lto -fno-pie -Isrc -Ikernel/include \
-              -Ibsdfmt $(EXTRA)
+# -O3 for this translation unit, and deliberately *not* -ffast-math.
+#
+# Letting the compiler reassociate floating-point sums was tried, on the
+# theory that a dot product cannot vectorise without it. It was worth
+# about nothing — 40.8 s against 38.1 s on the same question, slightly
+# the wrong side of noise — because dequantisation dominates and the
+# arithmetic was never the bottleneck. `llm bench` says so directly: two
+# milliseconds to expand the model's largest weight, under one to
+# multiply by it.
+#
+# It also cost something real. With reassociation permitted, the batched
+# and unbatched paths through the same maths vectorise differently and
+# stop agreeing bit-for-bit, so which of the two ran changed the answer.
+# Paying determinism for nothing is a bad trade.
+LLM_CFLAGS := -O3 -Wall -Wextra -ffreestanding \
+              -fno-stack-protector -fno-stack-check -fno-lto -fno-pie \
+              -Isrc -Ikernel/include -Ibsdfmt $(EXTRA)
 
 build/llm.o: src/llm.c $(wildcard src/*.h)
 	@mkdir -p build
