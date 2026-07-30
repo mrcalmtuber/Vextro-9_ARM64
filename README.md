@@ -11,6 +11,7 @@
   <img alt="virtio" src="https://img.shields.io/badge/devices-virtio-1f2430?style=flat-square">
   <img alt="pi" src="https://img.shields.io/badge/board-Raspberry%20Pi%204-1f2430?style=flat-square">
   <a href="../../releases"><img alt="releases" src="https://img.shields.io/badge/download-ISO-d4af37?style=flat-square"></a>
+  <a href="https://github.com/mrcalmtuber/socrates-bsd-9"><img alt="x86_64 original" src="https://img.shields.io/badge/also%20on-x86__64-d4af37?style=flat-square"></a>
 </p>
 
 <p align="center">
