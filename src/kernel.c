@@ -1419,6 +1419,11 @@ void kmain(void) {
             }
 #endif
 #ifdef AUTO_ASK
+            /* The opt-in dialog would otherwise block, and the loader
+             * correctly refuses on an unanswered question. */
+            if (ai_enabled < 0) { ai_choice_save(1); ai_autoload_start(); }
+#endif
+#ifdef AUTO_ASK
             /*
              * Put one question to the chat engine, for the harness.
              *

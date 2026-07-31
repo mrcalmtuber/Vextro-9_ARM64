@@ -65,6 +65,22 @@ Watch the prediction sharpen as context arrives — `The` → ` following`,
 query heads over 2 key/value heads, a 151,936-token vocabulary, and 373 MB
 of weights resident.
 
+And this is what the port was *for*:
+
+<p align="center">
+  <img src="docs/chat.png" width="88%" alt="The Wikipedia window answering a question about photosynthesis from a retrieved article">
+</p>
+
+Asked *what is photosynthesis*, it took the distinctive words out of the
+question, binary-searched 399,853 sorted titles, read
+`[context: Photosynthesis]` off a 980 MB archive and answered from that
+article — retrieval-augmented generation with no index, no database and no
+network. The wording is the model's own, mangled grammar and all.
+
+That is a complete answer, captured under `hvf`. **The same question on the
+x86_64 tree, under full emulation, was still consuming the prompt five
+minutes later** — which is the argument for this port in one screenshot.
+
 <p align="center">
   <img src="docs/terminal.png" width="88%" alt="df, net and mem showing the virtio backends">
 </p>
