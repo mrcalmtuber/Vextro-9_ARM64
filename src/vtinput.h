@@ -30,6 +30,7 @@
 /* Event types, from the Linux input layer that virtio-input borrows. */
 #define EV_SYN 0x00
 #define EV_KEY 0x01
+#define EV_SYN 0x00
 #define EV_REL 0x02
 #define EV_ABS 0x03
 
@@ -69,6 +70,9 @@ struct virtio_input_event {
 } __attribute__((packed));
 
 /* ---- pointer state, as the portable UI expects it ---- */
+
+/* Relative motion banked between EV_SYN boundaries; see EV_REL. */
+static int32_t vti_rel_dx = 0, vti_rel_dy = 0;
 
 volatile int32_t mouse_x = 0;
 volatile int32_t mouse_y = 0;
@@ -374,12 +378,28 @@ static void vti_drain(vti_dev_t *d) {
                                     vti_abs_max_y, vti_screen_h);
             break;
         case EV_REL:
-            if (ev.code == REL_X)          mouse_x += (int32_t)ev.value;
-            else if (ev.code == REL_Y)     mouse_y += (int32_t)ev.value;
+            /*
+             * Banked rather than applied. The two axes arrive as separate
+             * events and the acceleration curve needs the whole movement
+             * to judge its speed -- taking them one at a time would read a
+             * diagonal flick as two slow moves and refuse to accelerate
+             * either. EV_SYN below is where a report ends.
+             */
+            if (ev.code == REL_X)          vti_rel_dx += (int32_t)ev.value;
+            else if (ev.code == REL_Y)     vti_rel_dy += (int32_t)ev.value;
             else if (ev.code == REL_WHEEL) mouse_wheel += (int32_t)ev.value;
             break;
+        case EV_SYN:
+            if (vti_rel_dx || vti_rel_dy) {
+                int32_t dx = vti_rel_dx, dy = vti_rel_dy;
+                vti_rel_dx = vti_rel_dy = 0;
+                paccel_apply(&dx, &dy);
+                mouse_x += dx;
+                mouse_y += dy;
+            }
+            break;
         default:
-            break;                      /* EV_SYN and anything unknown */
+            break;
         }
 
         /* Hand the buffer straight back; the device needs the room. */

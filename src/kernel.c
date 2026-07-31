@@ -3,6 +3,7 @@
 #include "limine.h"
 #include "arm.h"
 #include "virtio.h"
+#include "paccel.h"
 #include "vtinput.h"
 #include "vtgpu.h"
 #include "mbox.h"
@@ -231,6 +232,80 @@ static int cursor_at(int32_t px, int32_t py, int32_t cx, int32_t cy,
     if (c == ' ') return 0;
     *out = (c == 'X') ? 0x000000u : 0xFFFFFFu;
     return 1;
+}
+
+/*
+ * The fling trail.
+ *
+ * A hard flick can carry the pointer most of the way across the screen in
+ * a couple of frames, which reads as the sprite disappearing and
+ * reappearing somewhere else. A few fading ghosts along the path make the
+ * movement legible -- you can see where it went rather than inferring it.
+ *
+ * Deliberately not always on. Below the fling threshold the trail is
+ * empty and the pointer costs exactly what it did before, which matters
+ * because slow movement is the precise mode and the last thing it wants
+ * is decoration.
+ */
+#define TRAIL_N 5
+
+static struct { int32_t x, y; uint8_t life; } trail[TRAIL_N];
+static int trail_used = 0;
+
+/* Weight of a ghost, 0-255, falling off with age. */
+static uint32_t trail_weight(uint8_t life) {
+    return (uint32_t)life * 40u;          /* life 4 -> 160, life 1 -> 40 */
+}
+
+/* Blend towards `c` by w/256, per channel, in integer arithmetic. */
+static uint32_t trail_blend(uint32_t bg, uint32_t c, uint32_t w) {
+    uint32_t br = (bg >> 16) & 0xFF, bgn = (bg >> 8) & 0xFF, bb = bg & 0xFF;
+    uint32_t cr = (c  >> 16) & 0xFF, cg  = (c  >> 8) & 0xFF, cb = c  & 0xFF;
+    uint32_t r = br + ((cr - br) * w >> 8);
+    uint32_t g = bgn + ((cg - bgn) * w >> 8);
+    uint32_t b = bb + ((cb - bb) * w >> 8);
+    return (r << 16) | (g << 8) | b;
+}
+
+/* The strongest ghost covering a pixel, if any. */
+static int trail_at(int32_t px, int32_t py, uint32_t *colour, uint32_t *weight) {
+    uint32_t best = 0, bc = 0;
+    for (int i = 0; i < trail_used; i++) {
+        if (!trail[i].life) continue;
+        uint32_t c;
+        if (!cursor_at(px, py, trail[i].x, trail[i].y, &c)) continue;
+        uint32_t w = trail_weight(trail[i].life);
+        if (w > best) { best = w; bc = c; }
+    }
+    if (!best) return 0;
+    *colour = bc;
+    *weight = best;
+    return 1;
+}
+
+/*
+ * Age the trail by one frame, and record where the pointer was if it was
+ * moving fast enough to be worth showing.
+ */
+static void trail_step(int32_t cx, int32_t cy, int moved_fast) {
+    for (int i = 0; i < trail_used; i++)
+        if (trail[i].life) trail[i].life--;
+
+    /* compact out the dead, so the search above stays short */
+    int k = 0;
+    for (int i = 0; i < trail_used; i++)
+        if (trail[i].life) trail[k++] = trail[i];
+    trail_used = k;
+
+    if (!moved_fast) return;
+    if (trail_used == TRAIL_N) {
+        for (int i = 1; i < TRAIL_N; i++) trail[i-1] = trail[i];
+        trail_used = TRAIL_N - 1;
+    }
+    trail[trail_used].x = cx;
+    trail[trail_used].y = cy;
+    trail[trail_used].life = 4;
+    trail_used++;
 }
 /*
  * Where the login screen is in its sequence.
@@ -522,6 +597,25 @@ static void vga_flip(volatile uint32_t *vram,
         if (cur_prev_x + CURSOR_W > ux1) ux1 = cur_prev_x + CURSOR_W;
         if (cur_prev_y + CURSOR_H > uy1) uy1 = cur_prev_y + CURSOR_H;
     }
+
+    /*
+     * Age the trail and fold every live ghost into the same rectangle --
+     * they have to be in it whether they are being drawn or erased.
+     *
+     * Only on the software path. The hardware cursor plane carries one
+     * sprite and no history, so there is nothing to trail with; asking
+     * for one would mean giving up the plane and repainting the scanout,
+     * which is the cost the plane exists to avoid.
+     */
+    if (soft_cursor) {
+        trail_step(cx, cy, paccel_is_fling());
+        for (int i = 0; i < trail_used; i++) {
+            if (trail[i].x < ux0) ux0 = trail[i].x;
+            if (trail[i].y < uy0) uy0 = trail[i].y;
+            if (trail[i].x + CURSOR_W > ux1) ux1 = trail[i].x + CURSOR_W;
+            if (trail[i].y + CURSOR_H > uy1) uy1 = trail[i].y + CURSOR_H;
+        }
+    }
     if (ux0 < 0) ux0 = 0;
     if (uy0 < 0) uy0 = 0;
     if (ux1 > (int32_t)w) ux1 = (int32_t)w;
@@ -554,9 +648,14 @@ static void vga_flip(volatile uint32_t *vram,
         for (uint32_t col = c0; col < c1; col++) {
             uint32_t px = src[col];
             cmp[col] = px;                    /* record the clean pixel */
-            uint32_t sprite;
-            if (in_cur && cursor_at((int32_t)col, (int32_t)row, cx, cy, &sprite))
-                px = sprite;                  /* the pointer wins, always */
+            uint32_t sprite, gw;
+            if (in_cur) {
+                if (trail_used &&
+                    trail_at((int32_t)col, (int32_t)row, &sprite, &gw))
+                    px = trail_blend(px, sprite, gw);
+                if (cursor_at((int32_t)col, (int32_t)row, cx, cy, &sprite))
+                    px = sprite;              /* the pointer wins, always */
+            }
             dst[col] = px;
         }
 
