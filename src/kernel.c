@@ -142,11 +142,22 @@ static void boot_list_entry(const char *name, uint32_t size, int is_dir) {
 
 
 /*
- * The pointer, drawn by the kernel rather than the panel.
+ * The pointer.
  *
- * ramfb has no hardware cursor plane and virtio-input reports positions
- * rather than moving one, so the arrow is composited into the back buffer
- * like everything else. Two colours: X is the outline, . the fill.
+ * It used to be stamped into the back buffer along with everything else,
+ * which meant moving it *changed the frame*: the flip compares against
+ * the previous frame and presents the bounding box of what differs, so a
+ * pointer crossing an otherwise still desktop dragged a full-width band
+ * of unchanged pixels across the virtio-gpu boundary every frame.
+ *
+ * virtio-gpu has a cursor plane, and it is now driven: the sprite lives
+ * in its own resource and moving it is one 56-byte command on a separate
+ * queue, with no scanout traffic at all. Where that is unavailable --
+ * ramfb, and the Raspberry Pi's mailbox framebuffer -- the arrow is
+ * composited into scanout after the flip instead, which keeps it out of
+ * the back buffer either way.
+ *
+ * Two colours: X is the outline, . the fill.
  */
 static const char *CURSOR_IMG[18] = {
     "X           ",
@@ -169,21 +180,184 @@ static const char *CURSOR_IMG[18] = {
     "      XXX   ",
 };
 
-static void draw_cursor(uint32_t bw, uint32_t bh) {
-    uint32_t cx = (uint32_t)mouse_x;
-    uint32_t cy = (uint32_t)mouse_y;
-    for (uint32_t row = 0; row < 18; row++) {
+#define CURSOR_W 12
+#define CURSOR_H 18
+
+/* Expand the ASCII art into the ARGB the cursor plane wants: opaque
+ * black outline, opaque white fill, everything else fully transparent. */
+static void cursor_build_argb(uint32_t *out) {
+    for (uint32_t i = 0; i < CURSOR_W * CURSOR_H; i++) out[i] = 0;
+    for (uint32_t row = 0; row < CURSOR_H; row++) {
         const char *line = CURSOR_IMG[row];
-        for (uint32_t col = 0; col < 12; col++) {
+        for (uint32_t col = 0; col < CURSOR_W; col++) {
             char c = line[col];
             if (c == ' ') continue;
-            uint32_t px = cx + col;
-            uint32_t py = cy + row;
-            if (px < bw && py < bh)
-                backbuf[py * bw + px] = (c == 'X') ? 0x000000u : 0xFFFFFFu;
+            out[row * CURSOR_W + col] =
+                (c == 'X') ? 0xFF000000u : 0xFFFFFFFFu;
         }
     }
 }
+
+/* ---- software fallback, for panels with no cursor plane ---- */
+
+static int32_t cur_prev_x = 0, cur_prev_y = 0;
+static int     cur_drawn  = 0;
+
+/* Repaint a rectangle of the true desktop over whatever is in scanout.
+ * Nothing needs saving first: `backbuf` never contains the pointer, so it
+ * *is* the clean desktop. */
+static void cursor_restore(volatile uint32_t *vram, uint32_t w, uint32_t h,
+                           uint32_t pitch_px, int32_t rx, int32_t ry) {
+    if (rx < 0) rx = 0;
+    if (ry < 0) ry = 0;
+    for (uint32_t row = 0; row < CURSOR_H; row++) {
+        uint32_t py = (uint32_t)ry + row;
+        if (py >= h) break;
+        const uint32_t   *src = backbuf + py * w;
+        volatile uint32_t *dst = vram + py * pitch_px;
+        for (uint32_t col = 0; col < CURSOR_W; col++) {
+            uint32_t px = (uint32_t)rx + col;
+            if (px >= w) break;
+            dst[px] = src[px];
+        }
+    }
+}
+
+/*
+ * Put the pointer on screen.
+ *
+ * With a cursor plane this is one command and no pixels. Without one it
+ * erases where the pointer was and draws it where it is, straight into
+ * scanout, after the flip.
+ */
+static void cursor_present(volatile uint32_t *vram, uint32_t w, uint32_t h,
+                           uint32_t pitch_px) {
+    int32_t cx = mouse_x, cy = mouse_y;
+
+    if (vgpu_ready && vgpu_cursor_ok) {
+        vtgpu_cursor_move((uint32_t)cx, (uint32_t)cy);
+        return;
+    }
+
+    /* The area to send: where the pointer was and where it now is. Taken
+     * before cur_prev_* is updated, because both corners are needed. */
+    int32_t ox = cur_drawn ? cur_prev_x : cx;
+    int32_t oy = cur_drawn ? cur_prev_y : cy;
+
+    if (cur_drawn && (ox != cx || oy != cy))
+        cursor_restore(vram, w, h, pitch_px, ox, oy);
+
+    for (uint32_t row = 0; row < CURSOR_H; row++) {
+        uint32_t py = (uint32_t)(cy + (int32_t)row);
+        if (py >= h) break;
+        const char        *line = CURSOR_IMG[row];
+        volatile uint32_t *dst  = vram + py * pitch_px;
+        for (uint32_t col = 0; col < CURSOR_W; col++) {
+            char c = line[col];
+            if (c == ' ') continue;
+            uint32_t px = (uint32_t)(cx + (int32_t)col);
+            if (px >= w) continue;
+            dst[px] = (c == 'X') ? 0x000000u : 0xFFFFFFu;
+        }
+    }
+    cur_prev_x = cx;
+    cur_prev_y = cy;
+    cur_drawn  = 1;
+
+    /*
+     * On virtio-gpu the software path has written into the resource
+     * rather than a live panel, so it still has to be handed over. Only
+     * the rectangle spanning the old and new positions.
+     */
+    if (vgpu_ready) {
+        int32_t x0 = ox < cx ? ox : cx;
+        int32_t y0 = oy < cy ? oy : cy;
+        int32_t x1 = (ox > cx ? ox : cx) + CURSOR_W;
+        int32_t y1 = (oy > cy ? oy : cy) + CURSOR_H;
+        if (x0 < 0) x0 = 0;
+        if (y0 < 0) y0 = 0;
+        if (x1 > (int32_t)w) x1 = (int32_t)w;
+        if (y1 > (int32_t)h) y1 = (int32_t)h;
+        if (x1 > x0 && y1 > y0)
+            vtgpu_present((uint32_t)x0, (uint32_t)y0,
+                          (uint32_t)(x1 - x0), (uint32_t)(y1 - y0));
+    }
+}
+
+/*
+ * Where the login screen is in its sequence.
+ *
+ * The machine used to have one anonymous passcode and two states: set it,
+ * or type it. With accounts there is a first run that asks for a name and
+ * a password twice, and a normal path that picks an account and asks for
+ * its password.
+ */
+enum {
+    LOGIN_PASSWORD = 0,   /* pick an account, type its password */
+    LOGIN_NEW_NAME,       /* first run: choose a username        */
+    LOGIN_NEW_PW,
+    LOGIN_NEW_CONFIRM
+};
+/* The failure animation, which this tree never needed because it never
+ * refused anything. */
+static int      melt_active = 0;
+static uint32_t melt_tick = 0;
+#define MELT_DURATION 120        /* ~2 seconds at 60 Hz */
+
+static int  login_stage = LOGIN_PASSWORD;
+static int  login_sel = 0;               /* which account is highlighted */
+static char login_msg[96] = "";          /* replaces the prompt when set */
+static char pending_name[USER_NAME_MAX];
+static char pending_pw[64];   /* matches the login field below */
+
+
+/*
+ * The accounts on this machine, above the login box.
+ *
+ * Lives here rather than in login.h because login.h is included before
+ * the filesystem layer that users.h needs, and login.h is byte-identical
+ * across the two architecture trees -- a property worth keeping.
+ *
+ * Only drawn when there is a choice to make: one account and the box on
+ * its own is the whole interface, exactly as before.
+ */
+#define ACCT_W   150
+#define ACCT_H   34
+#define ACCT_GAP 10
+
+static void login_draw_users(uint32_t *buf, uint32_t w, uint32_t h,
+                             int32_t mx, int32_t my, uint8_t lmb) {
+    static uint8_t prev = 0;
+    int click = (lmb & 1) && !prev;
+    prev = lmb & 1;
+
+    int32_t total = user_count * ACCT_W + (user_count - 1) * ACCT_GAP;
+    int32_t x0 = ((int32_t)w - total) / 2;
+    int32_t y0 = ((int32_t)h - LOGIN_BOX_H) / 2 - ACCT_H - 26;
+    if (y0 < 8) y0 = 8;
+
+    for (int i = 0; i < user_count; i++) {
+        int32_t x = x0 + i * (ACCT_W + ACCT_GAP);
+        int sel = (i == login_sel);
+        int hot = (mx >= x && mx < x + ACCT_W && my >= y0 && my < y0 + ACCT_H);
+
+        if (click && hot) login_sel = i;
+
+        gfx_rect(buf, w, h, x, y0, ACCT_W, ACCT_H,
+                 sel ? 0x2A2410u : 0x0E1017u);
+        gfx_rect_outline(buf, w, h, x, y0, ACCT_W, ACCT_H,
+                         sel ? COLOR_GOLD : (hot ? 0x6A5A20u : 0x2A3040u));
+
+        const char *nm = user_name_of(i);
+        int tw = ttf_text_width(nm, 14);
+        ttf_draw_string(buf, (int)w, (int)h, x + (ACCT_W - tw) / 2, y0 + 7,
+                        nm, sel ? COLOR_GOLD : 0x9098A8u, 14);
+
+        if (user_is_admin(i))
+            gfx_rect(buf, w, h, x + 6, y0 + 6, 4, 4, COLOR_GOLD);
+    }
+}
+
 
 static void halt_forever(void) {
     for (;;) __asm__ volatile("wfi");
@@ -300,6 +474,15 @@ uint64_t arm_syscall(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2) {
 static void vga_flip(volatile uint32_t *vram,
                      uint32_t w, uint32_t h, uint32_t pitch_px) {
     uint32_t y0 = h, y1 = 0, x0 = w, x1 = 0;    /* dirty bounding box */
+
+    /* Someone else wrote the panel, so what prevbuf claims is on screen
+     * is no longer true. This flag was declared and set on this tree but
+     * never read -- the x86 tree has honoured it since it was added. */
+    if (gfx_force_full_flip) {
+        gfx_force_full_flip = 0;
+        prev_valid = 0;
+        cur_drawn = 0;      /* no stale sprite to erase either */
+    }
 
     for (uint32_t row = 0; row < h; row++) {
         const uint32_t *src = backbuf + row * w;
@@ -533,6 +716,14 @@ void kmain(void) {
         panel_h  = vgpu_h;
         pitch_px = vgpu_w;
         vram     = (volatile uint32_t *)vgpu_fb;
+
+        /* Hand the arrow to the cursor plane, once. The hot spot is the
+         * top-left corner, which is where this sprite's point is. */
+        if (vgpu_cursor_ok) {
+            static uint32_t cur_argb[CURSOR_W * CURSOR_H];
+            cursor_build_argb(cur_argb);
+            vtgpu_cursor_define(cur_argb, CURSOR_W, CURSOR_H, 0, 0);
+        }
     } else if (board_kind != BOARD_VIRT && pifb_init(1280, 800)) {
         panel_w  = pifb_w;
         panel_h  = pifb_h;
@@ -614,6 +805,35 @@ void kmain(void) {
          * time, so this only opens the file.
          */
         ai_autoload_start();
+
+        /*
+         * Accounts.
+         *
+         * This tree accepted any password until now, because the volume
+         * it tests against is attached read-only and there was nowhere to
+         * keep a record. /etc/users.db lives on whichever volume is
+         * writable; a machine with an old plaintext /keycode.sys is
+         * carried forward into an administrator account named "admin".
+         */
+        /* The dock and Apps menu read this; without it an installed app
+         * is invisible until the store window is opened. The x86 tree has
+         * always called it. */
+        store_init();
+
+        users_load();
+        if (user_count == 0 && users_migrate_keycode())
+            serial_puts("[socrates/arm64] users: migrated /keycode.sys\n");
+
+        if (user_count == 0) {
+            login_stage = LOGIN_NEW_NAME;
+            serial_puts("[socrates/arm64] users: none, first-run setup\n");
+        } else {
+            login_stage = LOGIN_PASSWORD;
+            login_sel = 0;
+            serial_puts("[socrates/arm64] users: ");
+            serial_put_u64((uint64_t)user_count);
+            serial_puts(" account(s)\n");
+        }
 
         serial_puts("[socrates/arm64] exFAT: ");
         if (exf_vol.mounted) {
@@ -1042,6 +1262,29 @@ void kmain(void) {
          * things the milestones before this built, which is why wiring it
          * up is a branch rather than a port.
          */
+        /*
+         * Logging out. Handled here rather than where it is requested,
+         * because both the menu and the shell ask for it from inside a
+         * draw or a command, and session_end() closes every window --
+         * pulling the list out from under whatever is walking it.
+         */
+        if (want_logout) {
+            want_logout = 0;
+            serial_puts("[socrates/arm64] logout: ");
+            serial_puts(user_name_of(user_current));
+            serial_puts("\n");
+            session_end();
+            user_current = -1;
+            desktop_mode = 0;
+            login_stage = LOGIN_PASSWORD;
+            login_initialized = 0;      /* the vortex starts over */
+            prev_valid = 0;
+            pw_len = 0;
+            pw[0] = '\0';
+            login_msg[0] = '\0';
+            for (uint32_t i = 0; i < w * h; i++) backbuf[i] = COLOR_BLACK;
+        }
+
         if (desktop_mode) {
             char dch;
             while ((dch = kb_getchar()) != 0)
@@ -1142,8 +1385,8 @@ void kmain(void) {
                 wiki_ask(AUTO_ASK);
             }
 #endif
-            draw_cursor(w, h);
             vga_flip(vram, w, h, pitch_px);
+            cursor_present(vram, w, h, pitch_px);
             CHK(5);
 
             frames++;
@@ -1170,36 +1413,139 @@ void kmain(void) {
             continue;
         }
 
-        /* Echo what has been typed, so the field fills in as keys land. */
+        /* A refused password melts the screen, as it does on x86. */
+        if (melt_active) {
+            while (kb_getchar() != 0) { }        /* discard input */
+            screen_melt(backbuf, w, h, melt_tick);
+            melt_tick++;
+            if (melt_tick >= MELT_DURATION) {
+                melt_active = 0;
+                melt_tick = 0;
+                melt_inited = 0;
+                login_initialized = 0;
+                for (uint32_t i = 0; i < w * h; i++) backbuf[i] = COLOR_BLACK;
+                prev_valid = 0;
+            }
+            vga_flip(vram, w, h, pitch_px);
+            cursor_present(vram, w, h, pitch_px);
+            next_frame += frame_ticks;
+            timer_wait_until(next_frame);
+            continue;
+        }
+
+        /*
+         * The login screen.
+         *
+         * This tree used to accept any password, including an empty one,
+         * because the volume it tests against is attached read-only and
+         * there was nowhere to keep a record. There is now: a small
+         * writable disk carries /etc/users.db, and the check here is the
+         * same one the x86 tree runs.
+         */
         char ch;
+        int enter_pressed = 0;
         while ((ch = kb_getchar()) != 0) {
             if (ch == '\b') {
                 if (pw_len > 0) pw_len--;
             } else if (ch == '\n') {
-                /*
-                 * First boot sets the password; later boots check it.
-                 * The volume this port tests against is attached
-                 * read-only, so there is nowhere to persist it yet and
-                 * any password is accepted on the first Enter — the
-                 * check itself lives in desktop.h and comes back with a
-                 * writable disk.
-                 */
-                desktop_mode = 1;
-                for (uint32_t i = 0; i < w * h; i++) backbuf[i] = COLOR_BLACK;
-                prev_valid = 0;
-                serial_puts("[socrates/arm64] desktop: entering\n");
-                pw_len = 0;
-
+                enter_pressed = 1;
+            } else if (ch == KEY_UP) {
+                if (login_stage == LOGIN_PASSWORD && login_sel > 0) login_sel--;
+            } else if (ch == KEY_DOWN) {
+                if (login_stage == LOGIN_PASSWORD && login_sel + 1 < user_count)
+                    login_sel++;
             } else if (ch >= 0x20 && ch < 0x7F && pw_len < (int)sizeof(pw) - 1) {
                 pw[pw_len++] = ch;
             }
             pw[pw_len] = '\0';
         }
+
+        if (enter_pressed && pw_len > 0) {
+            switch (login_stage) {
+            case LOGIN_NEW_NAME:
+                if (!user_name_ok(pw)) {
+                    str_copy(login_msg, user_err, sizeof(login_msg));
+                } else {
+                    str_copy(pending_name, pw, sizeof(pending_name));
+                    login_stage = LOGIN_NEW_PW;
+                    login_msg[0] = '\0';
+                }
+                break;
+
+            case LOGIN_NEW_PW:
+                str_copy(pending_pw, pw, sizeof(pending_pw));
+                login_stage = LOGIN_NEW_CONFIRM;
+                break;
+
+            case LOGIN_NEW_CONFIRM:
+                if (!str_eq(pending_pw, pw)) {
+                    str_copy(login_msg, "Those did not match. Try again.",
+                             sizeof(login_msg));
+                    login_stage = LOGIN_NEW_PW;
+                } else if (user_add(pending_name, pending_pw,
+                                    user_count == 0) < 0) {
+                    str_copy(login_msg, user_err, sizeof(login_msg));
+                    login_stage = LOGIN_NEW_PW;
+                } else {
+                    login_sel = user_find(pending_name);
+                    login_stage = LOGIN_PASSWORD;
+                    login_msg[0] = '\0';
+                }
+                for (uint32_t i = 0; i < sizeof(pending_pw); i++)
+                    pending_pw[i] = '\0';
+                break;
+
+            case LOGIN_PASSWORD:
+            default:
+                if (user_check(login_sel, pw)) {
+                    user_current = login_sel;
+                    session_begin(user_name_of(user_current));
+                    desktop_mode = 1;
+                    for (uint32_t i = 0; i < w * h; i++)
+                        backbuf[i] = COLOR_BLACK;
+                    prev_valid = 0;
+                    serial_puts("[socrates/arm64] login: ");
+                    serial_puts(user_name_of(user_current));
+                    serial_puts(user_is_admin(user_current) ? " (admin)\n"
+                                                            : "\n");
+                } else {
+                    melt_active = 1;
+                    melt_tick = 0;
+                    serial_puts("[socrates/arm64] login: refused\n");
+                }
+                break;
+            }
+            pw_len = 0;
+            pw[0] = '\0';
+        }
         if (desktop_mode) continue;
 
-        login_render(backbuf, w, h, mouse_x, mouse_y, pw,
-                     mouse_buttons, "Socrates BSD 9 - ARM64");
-        draw_cursor(w, h);
+        {
+            static char prompt_buf[96];
+            const char *prompt;
+            switch (login_stage) {
+            case LOGIN_NEW_NAME:
+                prompt = "Socrates BSD 9 ARM64 - Create an account. Username:";
+                break;
+            case LOGIN_NEW_PW:     prompt = "Choose a password:"; break;
+            case LOGIN_NEW_CONFIRM: prompt = "Type it once more:"; break;
+            default:
+                str_copy(prompt_buf, "Password for ", sizeof(prompt_buf));
+                str_append(prompt_buf, user_name_of(login_sel),
+                           sizeof(prompt_buf));
+                str_append(prompt_buf, ":", sizeof(prompt_buf));
+                prompt = prompt_buf;
+                break;
+            }
+            if (login_msg[0]) prompt = login_msg;
+
+            login_render(backbuf, w, h, mouse_x, mouse_y, pw,
+                         mouse_buttons, prompt);
+
+            if (login_stage == LOGIN_PASSWORD && user_count > 1)
+                login_draw_users(backbuf, w, h, mouse_x, mouse_y,
+                                 mouse_buttons);
+        }
 
         fill_rect(w, 0,     0,     w, 1, COLOR_GOLD);
         fill_rect(w, 0,     h - 1, w, 1, COLOR_GOLD);
@@ -1207,6 +1553,7 @@ void kmain(void) {
         fill_rect(w, w - 1, 0,     1, h, COLOR_GOLD);
 
         vga_flip(vram, w, h, pitch_px);
+        cursor_present(vram, w, h, pitch_px);
         CHK(5);
 
         frames++;

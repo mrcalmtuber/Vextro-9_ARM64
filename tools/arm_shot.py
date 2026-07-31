@@ -20,7 +20,9 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIRMWARE = "/opt/homebrew/share/qemu/edk2-aarch64-code.fd"
-# Read-only: this is the volume with wiki.zim and the model on it.
+# The volume with wiki.zim and the model. Writable now: accounts and
+# home directories live on whichever volume the system mounts, and
+# fs_mount() takes the largest, which is this one.
 DISK = os.path.join(ROOT, "..", "Socrates BSD 9", "disk.img")
 
 # EDK2 keeps its variables in a second flash bank and wants one even when
@@ -51,9 +53,15 @@ proc = subprocess.Popen([
     "-drive", f"if=pflash,format=raw,unit=1,file={ROOT}/build/efi-vars.fd",
     "-device", "ramfb",
 ] + ([
-    "-drive", f"if=none,id=d0,format=raw,readonly=on,file={DISK}",
+    "-drive", f"if=none,id=d0,format=raw,file={DISK}",
     "-device", "virtio-blk-device,drive=d0",
 ] if os.path.exists(DISK) else []) + [
+    # This tree's own writable volume: /etc/users.db and the home
+    # directories live here, because the disk above is shared with the
+    # x86 tree and attached read-only.
+    "-drive", f"if=none,id=d1,format=raw,file={ROOT}/build/data.img",
+    "-device", "virtio-blk-device,drive=d1",
+] + [
     "-netdev", "user,id=n0",
     "-device", "virtio-net-device,netdev=n0",
     "-global", "virtio-mmio.force-legacy=false",

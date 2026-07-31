@@ -104,8 +104,11 @@ static const wk_meta_t wk_meta[WK_COUNT] = {
     { "hello",            600, 430 },
     { "Agora App Store",  720, 520 },
     { "Photos",           760, 560 },
-    { "Wikipedia",        520, 520 },
-    { "Settings",         470, 390 },
+    /* Wide enough to read prose in: articles are laid out in this window
+     * now rather than handed to the browser, and 520 was a search box. */
+    { "Wikipedia",        780, 580 },
+    /* Taller since the Users pane joined it. */
+    { "Settings",         470, 560 },
     { "About Socrates",   380, 270 },
 };
 
@@ -203,12 +206,63 @@ static int fs_kind = FS_NONE;
 static uint8_t fs_filebuf[FS_FILEBUF_MAX];
 static const char *fs_errstr = "";
 
+/*
+ * Mount the largest volume any disk is carrying.
+ *
+ * The x86 tree takes the first one it can read, because there is one disk
+ * and the loop runs once. This tree really does boot with two: a large
+ * volume holding the encyclopedia, the model and the app store, and a
+ * small one for accounts and home directories. Taking the first would
+ * pick whichever the device tree happened to enumerate first and could
+ * leave the encyclopedia unmounted, so size is the tie-breaker -- the
+ * system volume is the big one, on this machine and on any plausible
+ * real one.
+ */
 static void fs_mount(void) {
-    exfat_mount();
-    if (exf_vol.mounted) { fs_kind = FS_EXFAT; return; }
-    fat32_mount();
-    if (fat_vol.mounted) { fs_kind = FS_FAT32; return; }
+    int best = -1;
+    uint64_t best_kb = 0;
+
+    for (int i = 0; i < blk_count; i++) {
+        if (blk_select(i) != 0) continue;
+        int kind = FS_NONE;
+        exfat_mount();
+        if (exf_vol.mounted) kind = FS_EXFAT;
+        else {
+            fat32_mount();
+            if (fat_vol.mounted) kind = FS_FAT32;
+        }
+        if (kind == FS_NONE) continue;
+
+        /* Straight off the volume rather than through fs_total_kb, which
+         * is defined below this point. */
+        uint64_t kb = (kind == FS_EXFAT) ? exf_total_kb() : fat_total_kb();
+        if (best < 0 || kb > best_kb) { best = i; best_kb = kb; }
+    }
+
     fs_kind = FS_NONE;
+    if (best < 0) {
+        if (blk_count > 0) blk_select(0);
+        serial_puts("[fs] no volume found on any disk\n");
+        return;
+    }
+
+    blk_select(best);
+    exfat_mount();
+    if (exf_vol.mounted) fs_kind = FS_EXFAT;
+    else {
+        fat32_mount();
+        if (fat_vol.mounted) fs_kind = FS_FAT32;
+    }
+
+    serial_puts("[fs] mounted ");
+    serial_puts(fs_kind == FS_EXFAT ? "exFAT" : "FAT32");
+    serial_puts(" on ");
+    serial_puts(blk_bus_name());
+    serial_puts(" disk ");
+    serial_put_dec((uint32_t)best);
+    serial_puts(" (");
+    serial_put_dec((uint32_t)(best_kb / 1024));
+    serial_puts(" MiB)\n");
 }
 
 static const char *fs_name(void) {
@@ -465,6 +519,16 @@ static int fs_list(const char *path, fs_list_cb cb) {
 }
 
 #include "zim.h"
+
+/* Accounts. After the filesystem layer above, which they are stored
+ * through, and after login.h (included by kernel.c first) for xorshift32
+ * and idt.h for cycle_now, which together seed the salt. */
+#include "sha256.h"
+#include "users.h"
+/* Set by the menu or the `logout` command; the render loop acts on it,
+ * because tearing the session down from inside a draw would pull the
+ * window list out from under the code walking it. */
+static int want_logout = 0;
 
 /* ===== 3. FORWARD DECLARATIONS ===== */
 
@@ -754,6 +818,9 @@ static int execute_bin(const char *filepath) {
 
 #include "term.h"
 #include "browser.h"
+/* After browser.h: reuses brw_fold_cp for Unicode folding. Before apps.h,
+ * which is where the Wikipedia window uses it. */
+#include "wikidoc.h"
 #include "apps.h"
 #include "store.h"
 
@@ -1247,6 +1314,8 @@ static void wallpaper_set_theme(int idx) {
 /* action codes above the window kinds */
 #define MENU_ACT_REBOOT   100
 #define MENU_ACT_SHUTDOWN 101
+#define MENU_ACT_LOGOUT   102
+
 #define MENU_ACT_APP_BASE 200      /* + index into store_inst[] */
 
 typedef struct {
@@ -1258,6 +1327,7 @@ static const menu_item_t menu_system[] = {
     { "About Socrates", WK_ABOUT },
     { "Settings",       WK_SETTINGS },
     { "-",              -1 },
+    { "Log Out",        MENU_ACT_LOGOUT },
     { "Restart",        MENU_ACT_REBOOT },
     { "Shut Down",      MENU_ACT_SHUTDOWN },
 };
@@ -1329,6 +1399,8 @@ static void menu_action(int action) {
             silent_launch = 0;
         }
         wm_open(action);
+    } else if (action == MENU_ACT_LOGOUT) {
+        want_logout = 1;
     } else if (action == 100) {
         machine_reset();   /* PSCI on aarch64; see arm.h */
     } else if (action == 101) {
@@ -1875,6 +1947,11 @@ static void desktop_key_input(char ch) {
         wiki_key(ch);
         return;
     }
+    if (wm_focus == WK_SETTINGS) {
+        if (ch == 27) { wm_close(WK_SETTINGS); return; }
+        settings_key(ch);
+        return;
+    }
     if (wm_focus == WK_ABOUT && ch == 27) {
         wm_close(WK_ABOUT);
         return;
@@ -1909,11 +1986,15 @@ static void desktop_wheel_input(int32_t notches) {
         store_scroll_by((int)(-step * 48));
         break;
     case WK_WIKI:
-        /* the article itself opens in the browser; here the wheel walks
-         * the result list, but not while the chat panel has the window */
-        if (wiki_mode == 0)
-            for (int32_t i = 0; i < mag; i++)
-                wiki_key(step > 0 ? KEY_UP : KEY_DOWN);
+        /* Scrolls the article when one is open, and otherwise walks the
+         * result list. Not while the chat panel has the window. */
+        if (wiki_mode == 0) {
+            if (wiki_view == 1)
+                wiki_scroll_by((int)(-step * 48));
+            else
+                for (int32_t i = 0; i < mag; i++)
+                    wiki_key(step > 0 ? KEY_UP : KEY_DOWN);
+        }
         break;
     case WK_IMAGE:
         for (int32_t i = 0; i < mag; i++)
@@ -1961,6 +2042,82 @@ static void desktop_render(uint32_t *buf, uint32_t w, uint32_t h,
     menubar_draw(buf, w, h, mx, my);
     menu_dropdown_draw(buf, w, h, mx, my);
     dock_draw(buf, w, h, mx, my);
+}
+
+/* ===== 12. SESSIONS =====
+ *
+ * App state is global and outlives a window being closed, which is what
+ * makes reopening the terminal feel like returning to it rather than
+ * starting over. Across a *logout* that same property is a leak: the next
+ * person to log in would inherit the last one's shell history, browser
+ * address, open documents and drawing.
+ *
+ * Everything cleared here is in-memory only. Files on the volume are not
+ * touched -- a home directory is the point, not a scratch space.
+ */
+static void session_end(void) {
+    /* every window shut, nothing focused */
+    for (int k = 0; k < WK_COUNT; k++) wins[k].open = 0;
+    wm_stack_n = 0;
+    wm_focus = -1;
+    wm_drag = -1;
+    menu_open_idx = -1;
+
+    /* terminal: history, scrollback and working directory */
+    term_hist_count = 0;
+    term_hist_pos = -1;
+    term_input_len = 0;
+    term_input[0] = '\0';
+    term_clear();
+    str_copy(term_cwd, "/", sizeof(term_cwd));
+
+    /* browser: history and current page */
+    brw_hist_n = 0;
+    brw_line_count = 0;
+    brw_scroll = 0;
+    str_copy(brw_addr, "socrates://home", BRW_ADDR_MAX);
+    brw_title[0] = '\0';
+
+    /* encyclopedia: reading position, trail and search */
+    wiki_view = 0;
+    wiki_hist_n = 0;
+    wiki_scroll = 0;
+    wiki_art_path[0] = '\0';
+    wiki_art_title[0] = '\0';
+    wiki_qlen = 0;
+    wiki_query[0] = '\0';
+    wiki_hit_count = 0;
+    wiki_sel = 0;
+    wiki_mode = 0;
+
+    /* files, photos, and the canvas */
+    str_copy(exp_path, "/", sizeof(exp_path));
+    exp_selected = -1;
+    img_loaded = 0;
+    img_name[0] = '\0';
+    for (uint32_t i = 0; i < PAINT_MAX_W * PAINT_MAX_H; i++)
+        paint_canvas[i] = 0xFFFFFFu;
+}
+
+/*
+ * Start a session as `name`: their home directory becomes the working
+ * directory for the shell and the file browser.
+ */
+static void session_begin(const char *name) {
+    session_end();
+
+    char home[80];
+    str_copy(home, "/home/", sizeof(home));
+    str_append(home, name, sizeof(home));
+
+    /* Only if it is really there -- a volume that could not be written
+     * when the account was made should land in / rather than somewhere
+     * that does not exist. */
+    int is_dir = 0;
+    if (fs_stat(home, 0, &is_dir) && is_dir) {   /* returns 1 when found */
+        str_copy(term_cwd, home, sizeof(term_cwd));
+        str_copy(exp_path, home, sizeof(exp_path));
+    }
 }
 
 #endif /* DESKTOP_H */

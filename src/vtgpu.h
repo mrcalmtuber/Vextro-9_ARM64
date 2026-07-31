@@ -41,12 +41,23 @@
 #define VGPU_CMD_TRANSFER_TO_HOST_2D   0x0105
 #define VGPU_CMD_RESOURCE_ATTACH_BACKING 0x0106
 
+/* Cursor queue vocabulary. These do not go on the control queue: the
+ * device has a second virtqueue for them precisely so a pointer that
+ * moves every frame never queues behind a scanout transfer. */
+#define VGPU_CMD_UPDATE_CURSOR         0x0300
+#define VGPU_CMD_MOVE_CURSOR           0x0301
+
 #define VGPU_RESP_OK_NODATA            0x1100
 #define VGPU_RESP_OK_DISPLAY_INFO      0x1101
 
 /* B8G8R8X8: blue in the low byte, matching the 0x00RRGGBB words the
  * whole renderer already writes, so no per-pixel swizzle is needed. */
 #define VGPU_FORMAT_B8G8R8X8 2
+
+/* The cursor needs the alpha variant of the same layout: the sprite is a
+ * 12x18 arrow inside a 64x64 image and everything around it has to be
+ * transparent rather than black. */
+#define VGPU_FORMAT_B8G8R8A8 1
 
 struct vgpu_ctrl_hdr {
     uint32_t type;
@@ -114,6 +125,22 @@ struct vgpu_resource_flush {
     uint32_t padding;
 } __attribute__((packed));
 
+/* Both cursor commands share this shape; MOVE_CURSOR simply ignores the
+ * resource and hotspot fields. */
+struct vgpu_cursor_pos {
+    uint32_t scanout_id;
+    uint32_t x, y;
+    uint32_t padding;
+} __attribute__((packed));
+
+struct vgpu_update_cursor {
+    struct vgpu_ctrl_hdr hdr;
+    struct vgpu_cursor_pos pos;
+    uint32_t resource_id;
+    uint32_t hot_x, hot_y;
+    uint32_t padding;
+} __attribute__((packed));
+
 static uint64_t vgpu_base = 0;
 static virtq_t  vgpu_q;
 static int      vgpu_ready = 0;
@@ -122,6 +149,23 @@ static uint32_t vgpu_w = 0, vgpu_h = 0;
 static struct vring_desc  vgpu_desc[VQ_SIZE] __attribute__((aligned(16)));
 static struct vring_avail vgpu_avail         __attribute__((aligned(16)));
 static struct vring_used  vgpu_used          __attribute__((aligned(16)));
+
+/* Queue 1: the cursor plane. Its own rings, because a pointer that moves
+ * every frame must not queue behind a scanout transfer. */
+static virtq_t  vgpu_cq;
+static int      vgpu_cursor_ok = 0;
+static int      vgpu_cursor_busy = 0;   /* commands the device has not read yet */
+static struct vring_desc  vgpu_cdesc[VQ_SIZE] __attribute__((aligned(16)));
+static struct vring_avail vgpu_cavail         __attribute__((aligned(16)));
+static struct vring_used  vgpu_cused          __attribute__((aligned(16)));
+static uint8_t  vgpu_creq[64] __attribute__((aligned(64)));
+
+/* The cursor image. 64x64 is what the device expects; the arrow occupies
+ * the top-left corner and the rest is transparent. */
+#define VGPU_CURSOR_DIM 64
+#define VGPU_CURSOR_RES 2
+static uint32_t vgpu_cursor_img[VGPU_CURSOR_DIM * VGPU_CURSOR_DIM]
+    __attribute__((aligned(4096)));
 
 /* One request and one response buffer. Requests are issued one at a time
  * and waited on, so a single pair cannot be raced. */
@@ -268,7 +312,135 @@ static int vtgpu_init(uint32_t want_w, uint32_t want_h) {
     serial_puts("[socrates/arm64] virtio-gpu: scanout ");
     serial_put_u64(dw); serial_puts("x"); serial_put_u64(dh);
     serial_puts("\n");
+
+    /*
+     * The cursor plane.
+     *
+     * Everything below is optional: if the device has no second queue, or
+     * refuses any of these, vgpu_cursor_ok stays 0 and the caller falls
+     * back to compositing the pointer in software. virtq_setup returns 0
+     * for a queue that does not exist, so probing is safe.
+     */
+    if (virtq_setup(vgpu_base, 1, &vgpu_cq, vgpu_cdesc, &vgpu_cavail,
+                    &vgpu_cused)) {
+        vgpu_hdr(VGPU_CMD_RESOURCE_CREATE_2D);
+        struct vgpu_resource_create_2d *cc =
+            (struct vgpu_resource_create_2d *)vgpu_req;
+        cc->resource_id = VGPU_CURSOR_RES;
+        cc->format = VGPU_FORMAT_B8G8R8A8;   /* alpha, unlike the scanout */
+        cc->width = VGPU_CURSOR_DIM;
+        cc->height = VGPU_CURSOR_DIM;
+
+        if (vgpu_cmd(sizeof(*cc), sizeof(struct vgpu_ctrl_hdr)) == 0) {
+            vgpu_hdr(VGPU_CMD_RESOURCE_ATTACH_BACKING);
+            struct vgpu_resource_attach_backing *cb =
+                (struct vgpu_resource_attach_backing *)vgpu_req;
+            cb->resource_id = VGPU_CURSOR_RES;
+            cb->nr_entries = 1;
+            cb->entry.addr = virt_to_phys(vgpu_cursor_img);
+            cb->entry.length = sizeof(vgpu_cursor_img);
+            if (cb->entry.addr &&
+                vgpu_cmd(sizeof(*cb), sizeof(struct vgpu_ctrl_hdr)) == 0)
+                vgpu_cursor_ok = 1;
+        }
+    }
+
+    serial_puts(vgpu_cursor_ok
+                ? "[socrates/arm64] virtio-gpu: hardware cursor plane\n"
+                : "[socrates/arm64] virtio-gpu: no cursor queue, "
+                  "compositing the pointer\n");
     return 1;
+}
+
+/*
+ * Hand the sprite to the device, once.
+ *
+ * `img` is the arrow as ARGB rows; everything outside it is transparent.
+ * The transfer goes on the *control* queue -- it is an ordinary resource
+ * update -- while the UPDATE_CURSOR that arms the plane goes on the
+ * cursor queue.
+ */
+static void vtgpu_cursor_define(const uint32_t *img, uint32_t iw, uint32_t ih,
+                                uint32_t hot_x, uint32_t hot_y) {
+    if (!vgpu_cursor_ok) return;
+
+    for (uint32_t i = 0; i < VGPU_CURSOR_DIM * VGPU_CURSOR_DIM; i++)
+        vgpu_cursor_img[i] = 0;
+    for (uint32_t y = 0; y < ih && y < VGPU_CURSOR_DIM; y++)
+        for (uint32_t x = 0; x < iw && x < VGPU_CURSOR_DIM; x++)
+            vgpu_cursor_img[y * VGPU_CURSOR_DIM + x] = img[y * iw + x];
+    DSB();
+
+    vgpu_hdr(VGPU_CMD_TRANSFER_TO_HOST_2D);
+    struct vgpu_transfer_to_host_2d *t =
+        (struct vgpu_transfer_to_host_2d *)vgpu_req;
+    t->r.x = 0; t->r.y = 0;
+    t->r.width = VGPU_CURSOR_DIM; t->r.height = VGPU_CURSOR_DIM;
+    t->offset = 0;
+    t->resource_id = VGPU_CURSOR_RES;
+    if (vgpu_cmd(sizeof(*t), sizeof(struct vgpu_ctrl_hdr)) != 0) {
+        vgpu_cursor_ok = 0;
+        return;
+    }
+
+    /* Arm the plane. The cursor queue takes no response. */
+    for (uint32_t i = 0; i < sizeof(vgpu_creq); i++) vgpu_creq[i] = 0;
+    struct vgpu_update_cursor *u = (struct vgpu_update_cursor *)vgpu_creq;
+    u->hdr.type = VGPU_CMD_UPDATE_CURSOR;
+    u->pos.scanout_id = 0;
+    u->pos.x = 0; u->pos.y = 0;
+    u->resource_id = VGPU_CURSOR_RES;
+    u->hot_x = hot_x; u->hot_y = hot_y;
+    DSB();
+
+    uint64_t p = virt_to_phys(vgpu_creq);
+    if (!p) { vgpu_cursor_ok = 0; return; }
+    vq_buf_t b;
+    b.phys = p; b.len = sizeof(*u); b.device_writes = 0;
+    virtq_offer_chain(vgpu_base, 1, &vgpu_cq, 0, &b, 1);
+    vgpu_cursor_busy++;
+}
+
+/*
+ * Move the pointer.
+ *
+ * One 56-byte command and no scanout traffic at all -- the whole reason
+ * for driving the plane rather than compositing. Deliberately not waited
+ * on: a cursor position is a hint the device applies when it can, and
+ * blocking on it would put a round trip in every frame to no purpose.
+ */
+static void vtgpu_cursor_move(uint32_t x, uint32_t y) {
+    if (!vgpu_cursor_ok) return;
+
+    /*
+     * There is one request buffer, and the device reads it
+     * asynchronously, so it cannot be refilled until the previous command
+     * has been consumed. Reap whatever has completed; if the outstanding
+     * one has not, skip this frame rather than overwrite a buffer the
+     * device is still reading. A dropped move costs nothing -- the next
+     * frame sends the current position, not a stale one.
+     */
+    while (virtq_has_used(&vgpu_cq)) {
+        virtq_take(&vgpu_cq);
+        if (vgpu_cursor_busy) vgpu_cursor_busy--;
+    }
+    if (vgpu_cursor_busy) return;
+
+    for (uint32_t i = 0; i < sizeof(vgpu_creq); i++) vgpu_creq[i] = 0;
+    struct vgpu_update_cursor *u = (struct vgpu_update_cursor *)vgpu_creq;
+    u->hdr.type = VGPU_CMD_MOVE_CURSOR;
+    u->pos.scanout_id = 0;
+    u->pos.x = x;
+    u->pos.y = y;
+    u->resource_id = VGPU_CURSOR_RES;
+    DSB();
+
+    uint64_t p = virt_to_phys(vgpu_creq);
+    if (!p) return;
+    vq_buf_t b;
+    b.phys = p; b.len = sizeof(*u); b.device_writes = 0;
+    virtq_offer_chain(vgpu_base, 1, &vgpu_cq, 0, &b, 1);
+    vgpu_cursor_busy++;
 }
 
 /*

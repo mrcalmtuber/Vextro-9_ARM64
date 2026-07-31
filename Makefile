@@ -92,8 +92,16 @@ build/fdt_test: tools/fdt_test.c src/fdt.h
 	@mkdir -p build
 	cc -O2 -Wall -Wextra -o $@ $<
 
-test: build/fdt_test
+test: build/fdt_test build/wikidoc_test
 	./build/fdt_test tools/testdata/bcm2711-rpi-4-b.dtb tools/testdata/qemu-virt.dtb
+	@./build/wikidoc_test
+
+# The article layout engine is pure computation over a byte buffer, so it
+# runs on the host -- the property it exists for, that a link must not end
+# the line, cannot be seen in a screenshot.
+build/wikidoc_test: tools/wikidoc_test.c src/wikidoc.h
+	@mkdir -p build
+	@cc -O1 -Wall -Wextra -std=gnu11 -Wno-unused-function -o $@ $<
 
 FORCE:
 
@@ -243,6 +251,7 @@ QEMU_COMMON = -M virt -m 2048 $(QEMU_CPU) -accel $(ACCEL) \
 	-device virtio-tablet-device \
 	$(QEMU_NET) \
 	$(QEMU_DISK) \
+	$(QEMU_DATA) \
 	-cdrom os.iso
 
 # User-mode networking: no privileges, no bridge, and its fixed addressing
@@ -255,12 +264,23 @@ QEMU_NET := -netdev user,id=n0 -device virtio-net-device,netdev=n0
 # PCIe ECAM window entirely — no bus walk, no BAR sizing, no page-table
 # work beyond what milestone 1 already did.
 #
-# Attached read-only by default. This is the 8 GB volume holding wiki.zim
-# and the model, it took a long time to build, and nothing in this port
-# needs to write to it yet. Pass DISK_RO=off deliberately when that
-# changes.
+# Attached read-write, which it did not used to be.
+#
+# It held wiki.zim and the model and nothing here needed to write to it,
+# so read-only was free. Accounts changed that: /etc/users.db and the home
+# directories have to live on the volume the system actually mounts, and
+# that is this one -- fs_mount() takes the largest, because the encyclopedia
+# and the model are on it and unmounting them to gain a writable disk would
+# be a poor trade.
+#
+# The cost is real and worth naming: qemu takes an exclusive lock on a
+# writable image, so this tree and the x86 tree can no longer run at the
+# same time. The failure is loud and self-explanatory --
+# `Failed to get "write" lock` naming the file -- rather than silent
+# corruption. Pass DISK_RO=on to go back to a read-only mount, at the cost
+# of not being able to create an account.
 DISK    ?= ../Socrates BSD 9/disk.img
-DISK_RO ?= on
+DISK_RO ?= off
 
 # $(wildcard) cannot be used here, and the reason is a trap worth naming:
 # it splits its argument on whitespace and the default path has spaces in
@@ -278,6 +298,26 @@ QEMU_DISK := -drive if=none,id=d0,format=raw,readonly=$(DISK_RO),file="$(DISK)" 
 else
 QEMU_DISK :=
 endif
+
+# --- The writable volume ---
+#
+# The disk above is shared with the x86 tree and attached read-only, so
+# there is nowhere on it to keep /etc/users.db or a home directory. This
+# is a small second disk that belongs to this tree alone.
+#
+# Deliberately *not* solved by making the shared disk writable: both trees
+# attach the same file, and qemu takes an exclusive lock on a writable
+# image, so doing that would make the two builds unable to run at the same
+# time. A separate 64 MB image costs nothing and keeps them independent.
+DATA := build/data.img
+DATA_MB ?= 64
+
+$(DATA):
+	@mkdir -p build
+	python3 tools/mkexfat.py $(DATA) $(DATA_MB)
+
+QEMU_DATA := -drive if=none,id=d1,format=raw,file=$(DATA) \
+	-device virtio-blk-device,drive=d1
 
 # EDK2 keeps its variables in a second flash bank; it wants one the same
 # size as the code image even when empty.
@@ -325,11 +365,12 @@ QEMU_DISPLAY := $(shell d=$$(qemu-system-aarch64 -display help 2>/dev/null); \
 # close make's own $(shell ...) expansion early)
 QEMU_FSKEY := $(if $(findstring cocoa,$(QEMU_DISPLAY)),Ctrl + Cmd + F,Ctrl + Alt + F)
 
-run: os.iso efi-vars
+run: os.iso efi-vars $(DATA)
 	@echo ""
 	@echo "  [TIP] Toggle full-screen on/off at any time with: $(QEMU_FSKEY)"
 	@echo "  [TIP] The pointer is absolute — just move it, no click to grab."
-	@echo "  [TIP] The keycode for the shared disk.img is: exfat"
+	@echo "  [TIP] First run asks for a username and a password; they are"
+	@echo "        kept on this tree's own writable disk ($(DATA))."
 	@echo ""
 	qemu-system-aarch64 $(QEMU_COMMON) \
 		-display $(QEMU_DISPLAY) \
@@ -338,7 +379,7 @@ run: os.iso efi-vars
 
 # Headless, for the scripted harness: serial to a log, QMP for input and
 # screenshots. Same shape as the x86 tree's tools/qemu_drive.py workflow.
-run-headless: os.iso efi-vars
+run-headless: os.iso efi-vars $(DATA)
 	qemu-system-aarch64 $(QEMU_COMMON) -display none \
 		-serial file:build/serial.log \
 		-qmp tcp:127.0.0.1:4480,server,nowait

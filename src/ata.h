@@ -161,13 +161,23 @@ static int ata_flush(void) {
     return vblk_request(VIRTIO_BLK_T_FLUSH, 0, 0, 0, 0);
 }
 
-static void ata_init(void) {
+/*
+ * Bring up the virtio-blk device at `index`.
+ *
+ * There can be more than one: this port attaches the big shared volume
+ * read-only and a small writable one beside it, because /etc/users.db and
+ * the home directories have to be written somewhere and the shared disk
+ * is also opened by the x86 tree. Each is brought up on its own queue and
+ * the block layer switches between them.
+ */
+static void ata_init_at(uint32_t index) {
     ata_present = 0;
     ata_sectors = 0;
 
-    vblk_base = virtio_find(VIRTIO_ID_BLOCK, 0);
+    vblk_base = virtio_find(VIRTIO_ID_BLOCK, index);
     if (!vblk_base) {
-        serial_puts("[socrates/arm64] virtio-blk: no device\n");
+        if (index == 0)
+            serial_puts("[socrates/arm64] virtio-blk: no device\n");
         return;
     }
     if (!virtio_begin(vblk_base)) {
@@ -186,11 +196,15 @@ static void ata_init(void) {
     ata_sectors = ((uint64_t)hi << 32) | lo;
     ata_present = 1;
 
-    serial_puts("[socrates/arm64] virtio-blk: ");
+    serial_puts("[socrates/arm64] virtio-blk ");
+    serial_put_u64(index);
+    serial_puts(": ");
     serial_put_u64(ata_sectors);
     serial_puts(" sectors (");
     serial_put_u64(ata_sectors / 2048);
     serial_puts(" MiB)\n");
 }
+
+static void ata_init(void) { ata_init_at(0); }
 
 #endif /* ATA_H */

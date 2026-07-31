@@ -35,6 +35,18 @@
 static int      blk_kind = BLK_NONE;
 static uint64_t blk_total_sectors = 0;
 
+/*
+ * How many disks were found, and which one is currently selected.
+ *
+ * There is more than one now: the big shared volume carrying the
+ * encyclopedia and the model is attached read-only -- the x86 tree opens
+ * the same file -- so accounts and home directories need a second,
+ * writable disk beside it. fs_mount() tries each in turn, exactly as the
+ * x86 tree's does.
+ */
+static int      blk_count = 0;
+static int      blk_cur = -1;
+
 static const char *blk_bus_name(void) {
     switch (blk_kind) {
         case BLK_VIRTIO: return "virtio-blk";
@@ -59,9 +71,18 @@ static void blk_init(void) {
     blk_kind = BLK_NONE;
     blk_total_sectors = 0;
 
+    /* Count the virtio-blk devices present, without leaving one selected:
+     * blk_select() below is what actually brings one up for use. */
+    blk_count = 0;
+    for (uint32_t i = 0; i < 4; i++) {
+        if (!virtio_find(VIRTIO_ID_BLOCK, i)) break;
+        blk_count++;
+    }
+
     ata_init();
     if (ata_present) {
         blk_kind = BLK_VIRTIO;
+        blk_cur = 0;
         blk_total_sectors = ata_sectors;
     } else if (emmc_init()) {
         blk_kind = BLK_EMMC;
@@ -77,6 +98,25 @@ static void blk_init(void) {
     serial_puts(", ");
     serial_put_u64(blk_total_sectors / 2048);
     serial_puts(" MB\n");
+}
+
+/*
+ * Make disk `i` the one the filesystems see.
+ *
+ * Returns 0 on success. The SD card is always disk 0 and there is only
+ * ever one of it, so this is a virtio-only concern.
+ */
+static int blk_select(int i) {
+    if (i < 0) return -1;
+    if (blk_kind == BLK_EMMC) return i == 0 ? 0 : -1;
+    if (i >= blk_count) return -1;
+    if (i == blk_cur) return 0;
+
+    ata_init_at((uint32_t)i);
+    if (!ata_present) return -1;
+    blk_cur = i;
+    blk_total_sectors = ata_sectors;
+    return 0;
 }
 
 static int blk_read(uint64_t lba, uint32_t count, void *buf) {
