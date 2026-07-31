@@ -132,6 +132,9 @@ static void term_newline(void) {
 }
 
 static void term_putc(char ch) {
+#ifdef CU_SELFTEST
+    if (!term_redirect_active) serial_putc(ch);
+#endif
     if (term_redirect_active) {
         if (term_cap_len < TERM_CAP_MAX)
             term_cap[term_cap_len++] = ch;
@@ -537,15 +540,36 @@ static void term_prompt_begin(void) {
     term_input[0] = '\0';
 }
 
-/* Split into argv (destructive on buf) */
+/*
+ * Split into argv (destructive on buf).
+ *
+ * Quotes are honoured, single and double alike. Without them a separator
+ * that *is* a space cannot be written down -- `cut -d ' '` split into
+ * `-d` and nothing, and `grep "two words"` searched for `"two`. The
+ * quotes are removed as the argument is copied down over itself, which
+ * needs no second buffer.
+ */
 static int term_split(char *buf, char **argv, int max) {
     int argc = 0;
     char *p = buf;
     while (*p && argc < max) {
         while (*p == ' ') *p++ = '\0';
         if (!*p) break;
-        argv[argc++] = p;
-        while (*p && *p != ' ') p++;
+
+        char *w = p;                 /* where the unquoted text is built */
+        argv[argc++] = w;
+        while (*p && *p != ' ') {
+            if (*p == '"' || *p == '\'') {
+                char q = *p++;
+                while (*p && *p != q) *w++ = *p++;
+                if (*p) p++;         /* step over the closing quote */
+            } else {
+                *w++ = *p++;
+            }
+        }
+        int at_end = (*p == '\0');
+        *w = '\0';
+        if (!at_end) p++;
     }
     return argc;
 }
@@ -772,9 +796,15 @@ static void term_run_command(void) {
     }
 }
 
+/* The Unix toolset. Needs term_resolve and the term_print helpers
+ * above, so it is included here rather than at the top. */
+#include "coreutils.h"
+
 static void term_exec(char *cmdline) {
-    char *argv[8];
-    int argc = term_split(cmdline, argv, 8);
+    /* Room for flags as well as operands: `grep -i -n pat file` is four,
+     * and the coreutils below take more. */
+    char *argv[16];
+    int argc = term_split(cmdline, argv, 16);
     if (argc == 0) return;
     const char *cmd = argv[0];
 
@@ -1533,6 +1563,8 @@ static void term_exec(char *cmdline) {
     } else if (str_eq(cmd, "shutdown") || str_eq(cmd, "poweroff")) {
         term_print_c("powering off...\n", 1);
         machine_poweroff();   /* PSCI on aarch64; see arm.h */
+    } else if (cu_dispatch(cmd, argc, argv)) {
+        /* handled by coreutils.h */
     } else {
         term_print_c("unknown command: ", 2);
         term_print_c(cmd, 2);

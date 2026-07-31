@@ -1598,7 +1598,41 @@ void kmain(void) {
                     for (uint32_t i = 0; i < w * h; i++)
                         backbuf[i] = COLOR_BLACK;
                     prev_valid = 0;
-                    serial_puts("[socrates/arm64] login: ");
+    #ifdef CU_SELFTEST
+                    /* The Unix toolset, exercised against real files. The
+                     * terminal is a framebuffer window a harness cannot
+                     * read, so term_print is mirrored to serial. */
+                    wm_open(WK_TERM);
+                    fs_write_file("/t.txt",
+                        "alpha bravo charlie\n"
+                        "delta echo foxtrot\n"
+                        "alpha again\n"
+                        "delta echo foxtrot\n", 70);
+                    {
+                        static const char *cu[] = {
+                            "ls /", "wc /t.txt", "grep -n alpha /t.txt",
+                            "sort -u /t.txt", "tr a-z A-Z /t.txt",
+                            "sed s/alpha/OMEGA/g /t.txt",
+                            "cut -d ' ' -f 2 /t.txt",
+                            "sha256sum /t.txt", "file /t.txt",
+                            "hexdump -n 16 /t.txt", "seq 3",
+                            "test -f /t.txt", "arch", "nproc", "lscpu",
+                            "lspci", "lsblk", "free", "cal 7 2026",
+                            "id", "man grep", "tree /", "find / -name t*",
+                            0
+                        };
+                        for (int c = 0; cu[c]; c++) {
+                            serial_puts("[cu] $ ");
+                            serial_puts(cu[c]);
+                            serial_puts("\n");
+                            char line[64];
+                            str_copy(line, cu[c], sizeof(line));
+                            term_exec(line);
+                        }
+                        serial_puts("[cu] done\n");
+                    }
+#endif
+                serial_puts("[socrates/arm64] login: ");
                     serial_puts(user_name_of(user_current));
                     serial_puts(user_is_admin(user_current) ? " (admin)\n"
                                                             : "\n");
