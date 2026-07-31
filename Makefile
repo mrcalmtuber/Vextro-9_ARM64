@@ -279,6 +279,20 @@ QEMU_NET := -netdev user,id=n0 -device virtio-net-device,netdev=n0
 # `Failed to get "write" lock` naming the file -- rather than silent
 # corruption. Pass DISK_RO=on to go back to a read-only mount, at the cost
 # of not being able to create an account.
+# --- The encyclopedia and the model ---
+#
+# Neither can live in a repository: wiki.zim is about 980 MB and
+# qwen2.gguf about 380 MB, against GitHub's 100 MB limit. `make assets`
+# fetches them from Kiwix and Hugging Face into assets/.
+#
+# This tree normally reads them from the x86_64 tree's volume below, so
+# fetching is only needed for a standalone clone of this repository.
+.PHONY: assets
+assets:
+	@python3 tools/fetch_assets.py --dest assets $(if $(filter 1,$(ASSETS)),--yes,)
+
+ASSETS ?= ask
+
 DISK    ?= ../Socrates BSD 9/disk.img
 DISK_RO ?= off
 

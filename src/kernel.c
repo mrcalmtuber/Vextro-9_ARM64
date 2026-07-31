@@ -198,92 +198,40 @@ static void cursor_build_argb(uint32_t *out) {
     }
 }
 
-/* ---- software fallback, for panels with no cursor plane ---- */
-
-static int32_t cur_prev_x = 0, cur_prev_y = 0;
-static int     cur_drawn  = 0;
-
-/* Repaint a rectangle of the true desktop over whatever is in scanout.
- * Nothing needs saving first: `backbuf` never contains the pointer, so it
- * *is* the clean desktop. */
-static void cursor_restore(volatile uint32_t *vram, uint32_t w, uint32_t h,
-                           uint32_t pitch_px, int32_t rx, int32_t ry) {
-    if (rx < 0) rx = 0;
-    if (ry < 0) ry = 0;
-    for (uint32_t row = 0; row < CURSOR_H; row++) {
-        uint32_t py = (uint32_t)ry + row;
-        if (py >= h) break;
-        const uint32_t   *src = backbuf + py * w;
-        volatile uint32_t *dst = vram + py * pitch_px;
-        for (uint32_t col = 0; col < CURSOR_W; col++) {
-            uint32_t px = (uint32_t)rx + col;
-            if (px >= w) break;
-            dst[px] = src[px];
-        }
-    }
-}
+/* ---- software compositing, for panels with no cursor plane ---- */
 
 /*
- * Put the pointer on screen.
+ * Where there is no cursor plane -- ramfb, and the Pi's mailbox
+ * framebuffer -- the pointer is composited by the flip rather than drawn
+ * after it.
  *
- * With a cursor plane this is one command and no pixels. Without one it
- * erases where the pointer was and draws it where it is, straight into
- * scanout, after the flip.
+ * Drawing it after was the first attempt and it was worse than what it
+ * replaced: every frame the flip wrote desktop pixels over the sprite and
+ * the overlay put it back, so on any animating screen -- the login vortex
+ * above all -- the pointer was erased and redrawn sixty times a second,
+ * with no vblank to hide it in. That is the flicker, and it is why the
+ * pointer looked like it was sliding underneath things.
+ *
+ * Compositing inside the flip writes every pixel exactly once with its
+ * final value. prevbuf still records the clean desktop pixel, so change
+ * detection keeps comparing like with like.
+ *
+ * The virtio-gpu path never comes through here: there the sprite is a
+ * hardware plane and the scanout does not contain it at all.
  */
-static void cursor_present(volatile uint32_t *vram, uint32_t w, uint32_t h,
-                           uint32_t pitch_px) {
-    int32_t cx = mouse_x, cy = mouse_y;
+static int32_t cur_prev_x = 0, cur_prev_y = 0;
+static int     cur_valid = 0;
 
-    if (vgpu_ready && vgpu_cursor_ok) {
-        vtgpu_cursor_move((uint32_t)cx, (uint32_t)cy);
-        return;
-    }
-
-    /* The area to send: where the pointer was and where it now is. Taken
-     * before cur_prev_* is updated, because both corners are needed. */
-    int32_t ox = cur_drawn ? cur_prev_x : cx;
-    int32_t oy = cur_drawn ? cur_prev_y : cy;
-
-    if (cur_drawn && (ox != cx || oy != cy))
-        cursor_restore(vram, w, h, pitch_px, ox, oy);
-
-    for (uint32_t row = 0; row < CURSOR_H; row++) {
-        uint32_t py = (uint32_t)(cy + (int32_t)row);
-        if (py >= h) break;
-        const char        *line = CURSOR_IMG[row];
-        volatile uint32_t *dst  = vram + py * pitch_px;
-        for (uint32_t col = 0; col < CURSOR_W; col++) {
-            char c = line[col];
-            if (c == ' ') continue;
-            uint32_t px = (uint32_t)(cx + (int32_t)col);
-            if (px >= w) continue;
-            dst[px] = (c == 'X') ? 0x000000u : 0xFFFFFFu;
-        }
-    }
-    cur_prev_x = cx;
-    cur_prev_y = cy;
-    cur_drawn  = 1;
-
-    /*
-     * On virtio-gpu the software path has written into the resource
-     * rather than a live panel, so it still has to be handed over. Only
-     * the rectangle spanning the old and new positions.
-     */
-    if (vgpu_ready) {
-        int32_t x0 = ox < cx ? ox : cx;
-        int32_t y0 = oy < cy ? oy : cy;
-        int32_t x1 = (ox > cx ? ox : cx) + CURSOR_W;
-        int32_t y1 = (oy > cy ? oy : cy) + CURSOR_H;
-        if (x0 < 0) x0 = 0;
-        if (y0 < 0) y0 = 0;
-        if (x1 > (int32_t)w) x1 = (int32_t)w;
-        if (y1 > (int32_t)h) y1 = (int32_t)h;
-        if (x1 > x0 && y1 > y0)
-            vtgpu_present((uint32_t)x0, (uint32_t)y0,
-                          (uint32_t)(x1 - x0), (uint32_t)(y1 - y0));
-    }
+/* The sprite's colour at a screen position, or 0 where it does not cover. */
+static int cursor_at(int32_t px, int32_t py, int32_t cx, int32_t cy,
+                     uint32_t *out) {
+    int32_t dx = px - cx, dy = py - cy;
+    if (dx < 0 || dx >= CURSOR_W || dy < 0 || dy >= CURSOR_H) return 0;
+    char c = CURSOR_IMG[dy][dx];
+    if (c == ' ') return 0;
+    *out = (c == 'X') ? 0x000000u : 0xFFFFFFu;
+    return 1;
 }
-
 /*
  * Where the login screen is in its sequence.
  *
@@ -553,28 +501,63 @@ static void vga_flip(volatile uint32_t *vram,
 
     /* Someone else wrote the panel, so what prevbuf claims is on screen
      * is no longer true. This flag was declared and set on this tree but
-     * never read -- the x86 tree has honoured it since it was added. */
+     * never read; the x86 tree has honoured it since it was added. */
     if (gfx_force_full_flip) {
         gfx_force_full_flip = 0;
         prev_valid = 0;
-        cur_drawn = 0;      /* no stale sprite to erase either */
+        cur_valid = 0;
     }
+
+    /*
+     * The pointer is composited here only when there is no hardware
+     * plane. With one, the scanout never contains the sprite and moving
+     * it costs no pixels at all.
+     */
+    int soft_cursor = !(vgpu_ready && vgpu_cursor_ok);
+    int32_t cx = mouse_x, cy = mouse_y;
+    int32_t ux0 = cx, uy0 = cy, ux1 = cx + CURSOR_W, uy1 = cy + CURSOR_H;
+    if (soft_cursor && cur_valid) {
+        if (cur_prev_x < ux0) ux0 = cur_prev_x;
+        if (cur_prev_y < uy0) uy0 = cur_prev_y;
+        if (cur_prev_x + CURSOR_W > ux1) ux1 = cur_prev_x + CURSOR_W;
+        if (cur_prev_y + CURSOR_H > uy1) uy1 = cur_prev_y + CURSOR_H;
+    }
+    if (ux0 < 0) ux0 = 0;
+    if (uy0 < 0) uy0 = 0;
+    if (ux1 > (int32_t)w) ux1 = (int32_t)w;
+    if (uy1 > (int32_t)h) uy1 = (int32_t)h;
 
     for (uint32_t row = 0; row < h; row++) {
         const uint32_t *src = backbuf + row * w;
         uint32_t       *cmp = prevbuf + row * w;
 
+        int in_cur = soft_cursor && (int32_t)row >= uy0 &&
+                     (int32_t)row < uy1 && ux1 > ux0;
+
         uint32_t c0 = 0, c1 = w;
         if (prev_valid) {
             while (c0 < w && src[c0] == cmp[c0]) c0++;
-            if (c0 == w) continue;                  /* row unchanged */
-            while (c1 > c0 && src[c1 - 1] == cmp[c1 - 1]) c1--;
+            if (c0 == w) {
+                if (!in_cur) continue;              /* row unchanged */
+                c0 = (uint32_t)ux0;
+                c1 = (uint32_t)ux1;
+            } else {
+                while (c1 > c0 && src[c1 - 1] == cmp[c1 - 1]) c1--;
+                if (in_cur) {
+                    if ((uint32_t)ux0 < c0) c0 = (uint32_t)ux0;
+                    if ((uint32_t)ux1 > c1) c1 = (uint32_t)ux1;
+                }
+            }
         }
 
         volatile uint32_t *dst = vram + row * pitch_px;
         for (uint32_t col = c0; col < c1; col++) {
-            dst[col] = src[col];
-            cmp[col] = src[col];
+            uint32_t px = src[col];
+            cmp[col] = px;                    /* record the clean pixel */
+            uint32_t sprite;
+            if (in_cur && cursor_at((int32_t)col, (int32_t)row, cx, cy, &sprite))
+                px = sprite;                  /* the pointer wins, always */
+            dst[col] = px;
         }
 
         if (row < y0) y0 = row;
@@ -583,23 +566,18 @@ static void vga_flip(volatile uint32_t *vram,
         if (c1 > x1) x1 = c1;
     }
     prev_valid = 1;
+    cur_prev_x = cx;
+    cur_prev_y = cy;
+    cur_valid = 1;
+
+    /* The hardware plane moves independently of the scanout. */
+    if (vgpu_ready && vgpu_cursor_ok)
+        vtgpu_cursor_move((uint32_t)cx, (uint32_t)cy);
 
     if (y1 <= y0) return;              /* nothing moved; nothing to show */
 
-    /* the panel is device memory; make sure the writes have left */
     DSB();
 
-    /*
-     * A linear framebuffer is on screen the moment it is written. A
-     * virtio-gpu resource is not: the guest's pixels have to be
-     * transferred into the host's copy and that copy flushed to the
-     * display, so presenting is an explicit step rather than a
-     * consequence of storing — and it is charged by area, which is why
-     * it is handed the box rather than the screen.
-     */
-    /* What the boundary actually costs, as a share of the screen. A
-     * scanout transfer is charged by area, so this is the number that
-     * says whether the dirty box is earning its keep. */
     present_px += (uint64_t)(x1 - x0) * (y1 - y0);
     present_n++;
 
@@ -1462,7 +1440,6 @@ void kmain(void) {
             }
 #endif
             vga_flip(vram, w, h, pitch_px);
-            cursor_present(vram, w, h, pitch_px);
             CHK(5);
 
             frames++;
@@ -1503,7 +1480,6 @@ void kmain(void) {
                 prev_valid = 0;
             }
             vga_flip(vram, w, h, pitch_px);
-            cursor_present(vram, w, h, pitch_px);
             next_frame += frame_ticks;
             timer_wait_until(next_frame);
             continue;
@@ -1688,7 +1664,6 @@ void kmain(void) {
         fill_rect(w, w - 1, 0,     1, h, COLOR_GOLD);
 
         vga_flip(vram, w, h, pitch_px);
-        cursor_present(vram, w, h, pitch_px);
         CHK(5);
 
         frames++;
