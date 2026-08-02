@@ -82,6 +82,22 @@ endif
 
 .PHONY: all iso run run-headless efi-vars clean test FORCE
 
+# Say which target a bare `make` builds, rather than letting it fall to
+# whichever rule happens to appear first. It fell to build/fdt_test --
+# so `make` on a fresh clone compiled a host test binary, said it was up
+# to date, and never built the OS at all. Everything still worked here
+# because `make run` and `make all` name their goal, which is exactly why
+# it went unnoticed.
+.DEFAULT_GOAL := all
+
+# The writable volume, named here rather than beside its rule further
+# down. A prerequisite is expanded the moment make reads the rule, so
+# `all: os.iso $(DATA)` with DATA defined below would expand to nothing
+# and silently drop the disk from the build -- the same immediate-
+# expansion trap this file already documents for QEMU_DISK.
+DATA := build/data.img
+DATA_MB ?= 64
+
 # The device tree parser is pure byte manipulation with no architecture
 # in it, so it can be tested on the host against blobs from real
 # machines — a Raspberry Pi 4's, as shipped by the firmware, and qemu's
@@ -105,7 +121,11 @@ build/wikidoc_test: tools/wikidoc_test.c src/wikidoc.h
 
 FORCE:
 
-all: os.iso
+# The writable volume is part of a build, not a detail of `make run` --
+# on a standalone clone it is what carries the encyclopedia and the
+# model, and a build that produced neither is the bug this repository
+# just had.
+all: os.iso $(DATA)
 
 # --- Boot animation: video -> raw RGB565 + header ---
 build/boot_anim.raw kernel/include/boot_animation.h: boot.mp4 tools/convert_video.py
@@ -323,12 +343,39 @@ endif
 # attach the same file, and qemu takes an exclusive lock on a writable
 # image, so doing that would make the two builds unable to run at the same
 # time. A separate 64 MB image costs nothing and keeps them independent.
-DATA := build/data.img
-DATA_MB ?= 64
-
+# ...and, when this repository is cloned on its own, the only volume there
+# is.
+#
+# The disk above belongs to the x86_64 tree, so a checkout that has no
+# sibling gets QEMU_DISK empty: no encyclopedia, no model, nothing to
+# read. `make assets` would fetch both and then leave them sitting in
+# assets/ with no image to put them on, which is the same as not fetching
+# them at all.
+#
+# So when there is no sibling volume, this one carries them, and is sized
+# from what actually arrived rather than from a constant -- the fetch is
+# optional and may be declined, in which case this stays the small
+# writable disk it has always been.
 $(DATA):
 	@mkdir -p build
-	python3 tools/mkexfat.py $(DATA) $(DATA_MB)
+ifneq ($(DISK_PRESENT),yes)
+ifneq ($(ASSETS),0)
+	@echo "  no sibling x86_64 volume — the encyclopedia and the model go here"
+	@python3 tools/fetch_assets.py --dest assets $(if $(filter 1,$(ASSETS)),--yes,) || true
+endif
+endif
+	@set -e; \
+	files=""; \
+	for f in assets/wiki.zim assets/qwen2.gguf; do \
+	    if [ -f "$$f" ]; then files="$$files $$f"; fi; \
+	done; \
+	if [ -n "$$files" ]; then \
+	    mb=$$(python3 -c "import os,sys; print(sum(os.path.getsize(f) for f in sys.argv[1:]) // 1048576 + 512)" $$files); \
+	else \
+	    mb=$(DATA_MB); \
+	fi; \
+	echo "python3 tools/mkexfat.py $(DATA) $$mb$$files"; \
+	python3 tools/mkexfat.py $(DATA) $$mb $$files
 
 QEMU_DATA := -drive if=none,id=d1,format=raw,file=$(DATA) \
 	-device virtio-blk-device,drive=d1
