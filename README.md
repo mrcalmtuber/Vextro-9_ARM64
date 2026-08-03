@@ -323,13 +323,34 @@ rather than a slow one.
 
 ## Running it
 
+This needs an **`aarch64-elf` cross toolchain** — a bare-metal kernel
+cannot be built with the compiler that targets your own operating system.
+On macOS:
+
 ```sh
-make            # kernel + UEFI ISO
+brew install aarch64-elf-gcc aarch64-elf-binutils xorriso qemu
+```
+
+On Linux, `xorriso` and `qemu-system-arm` are packaged; the toolchain
+generally is not, and `gcc-aarch64-linux-gnu` is *not* a substitute — it
+targets Linux rather than bare metal. `python3` builds the disk image;
+**`ffmpeg` is optional** and only makes the boot animation. `make` names
+everything missing at once rather than stopping at the first one.
+
+```sh
+make            # kernel + UEFI ISO + the writable volume
 make run        # qemu, hvf by default
 make test       # the device tree parser, on the host, against real blobs
 ```
 
 Pre-built ISOs are under [**Releases**](../../releases).
+
+Cloned on its own, with no x86_64 tree beside it, `make` offers to fetch
+**Simple English Wikipedia** (~980 MB) and the **Qwen2 0.5B** model
+(~380 MB) and writes them onto this tree's own volume, which is sized to
+fit them. `ASSETS=0` skips it, `ASSETS=1` takes them without asking.
+Beside the x86_64 checkout none of that happens — the encyclopedia and
+the model are already on that volume.
 
 ```sh
 python3 tools/arm_run.py 400 hvf     # headless: serial, plus a register
@@ -359,10 +380,11 @@ registers, which is what identified the hardest bug in this port.
 brew install aarch64-elf-gcc aarch64-elf-binutils xorriso qemu
 ```
 
-UEFI firmware comes from QEMU's own
-`/opt/homebrew/share/qemu/edk2-aarch64-code.fd`. ARM has no BIOS, so unlike
-the x86 build there is no El Torito BIOS image and no boot-sector install —
-the ISO is UEFI-only.
+UEFI firmware comes from QEMU's own `edk2-aarch64-code.fd`, which the
+Makefile looks for in the places Homebrew, Debian and Fedora each put it;
+`make run FIRMWARE=/path/to/QEMU_EFI.fd` if yours is somewhere else. ARM
+has no BIOS, so unlike the x86 build there is no El Torito BIOS image and
+no boot-sector install — the ISO is UEFI-only.
 
 The kernel drives virtio-gpu itself, so the resolution is whatever the
 device reports rather than whatever the firmware's mode table contains:

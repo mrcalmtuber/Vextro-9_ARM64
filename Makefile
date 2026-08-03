@@ -52,10 +52,52 @@ LDFLAGS := -nostdlib -static -no-pie -z text -T linker.ld
 LIMINE := limine-binary
 ISO    := iso_root
 
+# --- Preflight ---
+#
+# Otherwise the build stops at the first tool it cannot find, with that
+# tool's own message. `make: aarch64-elf-gcc: No such file or directory`
+# is true, and tells someone who has just cloned this nothing about what
+# to install. Everything missing is named at once, before anything runs.
+#
+# Skipped for clean, which has to work on a machine with no toolchain.
+ifeq ($(filter clean,$(MAKECMDGOALS)),)
+NEED    := $(CC) $(LD) aarch64-elf-objcopy cc python3 xorriso
+MISSING := $(strip $(foreach t,$(NEED), \
+             $(if $(shell command -v $(t) 2>/dev/null),,$(t))))
+ifneq ($(MISSING),)
+$(info )
+$(info   Cannot build. Missing: $(MISSING))
+$(info )
+$(info   macOS:  brew install aarch64-elf-gcc aarch64-elf-binutils xorriso qemu)
+$(info )
+$(info   Linux:  xorriso and qemu-system-arm are packaged; an aarch64-elf)
+$(info           cross toolchain generally is not. Debian's)
+$(info           gcc-aarch64-linux-gnu targets Linux rather than bare)
+$(info           metal, so it is not a substitute -- build an elf)
+$(info           toolchain, or point CC and LD at one you already have.)
+$(info )
+$(info   ffmpeg is optional. Without it the boot animation is skipped and)
+$(info   the system boots straight to the login screen.)
+$(info )
+$(error missing build tools)
+endif
+endif
+
 # UEFI firmware for QEMU's virt machine. ARM has no BIOS, so unlike the
 # x86 build there is no El Torito BIOS image and no boot-sector install —
 # the ISO is UEFI-only.
-FIRMWARE := /opt/homebrew/share/qemu/edk2-aarch64-code.fd
+#
+# Looked for rather than assumed. This was Homebrew's path written out in
+# full, which is right on an Apple-silicon Mac and wrong everywhere else:
+# an Intel Mac keeps it under /usr/local, and every Linux distribution
+# puts it somewhere else again. Set FIRMWARE=... if yours is not here.
+FIRMWARE ?= $(firstword $(wildcard \
+	/opt/homebrew/share/qemu/edk2-aarch64-code.fd \
+	/usr/local/share/qemu/edk2-aarch64-code.fd \
+	/usr/share/qemu/edk2-aarch64-code.fd \
+	/usr/share/qemu-efi-aarch64/QEMU_EFI.fd \
+	/usr/share/AAVMF/AAVMF_CODE.fd \
+	/usr/share/edk2/aarch64/QEMU_EFI.fd))
 
 RES ?= 1280x800x32
 
@@ -432,7 +474,9 @@ QEMU_DATA := -drive if=none,id=d1,format=raw,file=$(DATA) \
 .PHONY: efi-vars
 efi-vars:
 	@mkdir -p build
-	@dd if=/dev/zero of=build/efi-vars.fd bs=1m count=64 2>/dev/null
+	@# bs=1m is BSD dd; GNU dd rejects the lowercase suffix outright,
+	@# so the count is spelled out in bytes and works on both.
+	@dd if=/dev/zero of=build/efi-vars.fd bs=1048576 count=64 2>/dev/null
 
 # Not every QEMU is built with the same display backends: Homebrew's
 # macOS build ships Cocoa and no SDL, most Linux builds have GTK and SDL.
@@ -454,6 +498,28 @@ QEMU_DISPLAY := $(shell d=$$(qemu-system-aarch64 -display help 2>/dev/null); \
 QEMU_FSKEY := $(if $(findstring cocoa,$(QEMU_DISPLAY)),Ctrl + Cmd + F,Ctrl + Alt + F)
 
 run: os.iso efi-vars $(DATA)
+	@command -v qemu-system-aarch64 >/dev/null || { \
+	    echo ""; \
+	    echo "  qemu-system-aarch64 is not installed."; \
+	    echo ""; \
+	    echo "  It is only needed to run the system here. os.iso is"; \
+	    echo "  already built and boots on real hardware, or in any"; \
+	    echo "  other virtual machine."; \
+	    echo ""; \
+	    echo "    macOS:  brew install qemu"; \
+	    echo "    Debian: sudo apt install qemu-system-arm"; \
+	    echo ""; \
+	    exit 1; }
+	@test -n "$(FIRMWARE)" || { \
+	    echo ""; \
+	    echo "  No aarch64 UEFI firmware found. qemu needs one to boot this ISO."; \
+	    echo ""; \
+	    echo "    macOS:  brew install qemu"; \
+	    echo "    Debian: sudo apt install qemu-efi-aarch64"; \
+	    echo ""; \
+	    echo "  Or point at it directly:  make run FIRMWARE=/path/to/QEMU_EFI.fd"; \
+	    echo ""; \
+	    exit 1; }
 	@echo ""
 	@echo "  [TIP] Toggle full-screen on/off at any time with: $(QEMU_FSKEY)"
 	@echo "  [TIP] The pointer is absolute — just move it, no click to grab."
@@ -468,6 +534,18 @@ run: os.iso efi-vars $(DATA)
 # Headless, for the scripted harness: serial to a log, QMP for input and
 # screenshots. Same shape as the x86 tree's tools/qemu_drive.py workflow.
 run-headless: os.iso efi-vars $(DATA)
+	@command -v qemu-system-aarch64 >/dev/null || { \
+	    echo ""; \
+	    echo "  qemu-system-aarch64 is not installed."; \
+	    echo ""; \
+	    echo "  It is only needed to run the system here. os.iso is"; \
+	    echo "  already built and boots on real hardware, or in any"; \
+	    echo "  other virtual machine."; \
+	    echo ""; \
+	    echo "    macOS:  brew install qemu"; \
+	    echo "    Debian: sudo apt install qemu-system-arm"; \
+	    echo ""; \
+	    exit 1; }
 	qemu-system-aarch64 $(QEMU_COMMON) -display none \
 		-serial file:build/serial.log \
 		-qmp tcp:127.0.0.1:4480,server,nowait
