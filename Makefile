@@ -307,11 +307,16 @@ QEMU_NET := -netdev user,id=n0 -device virtio-net-device,netdev=n0
 #
 # This tree normally reads them from the x86_64 tree's volume below, so
 # fetching is only needed for a standalone clone of this repository.
+ASSETS ?= ask
+
+ASSET_FILES := assets/wiki.zim assets/qwen2.gguf
+ASSET_LIST  := build/assets.list
+
 .PHONY: assets
 assets:
-	@python3 tools/fetch_assets.py --dest assets $(if $(filter 1,$(ASSETS)),--yes,)
-
-ASSETS ?= ask
+	@python3 tools/fetch_assets.py --dest assets --ask-again \
+		$(if $(filter 1,$(ASSETS)),--yes,)
+	@rm -f $(ASSET_LIST)
 
 DISK    ?= ../Socrates BSD 9/disk.img
 DISK_RO ?= off
@@ -332,6 +337,26 @@ QEMU_DISK := -drive if=none,id=d0,format=raw,readonly=$(DISK_RO),file="$(DISK)" 
 else
 QEMU_DISK :=
 endif
+
+# What is actually on hand, written down so the writable volume can depend
+# on it. Only rewritten when its contents change, so an ordinary rebuild
+# does not repack the disk for nothing.
+#
+# Fetching only matters on a standalone clone: with the x86_64 tree beside
+# it, the encyclopedia and the model are already on that volume.
+$(ASSET_LIST): FORCE
+	@mkdir -p build
+ifneq ($(DISK_PRESENT),yes)
+ifneq ($(ASSETS),0)
+	@echo "  no sibling x86_64 volume — the encyclopedia and the model go here"
+	@python3 tools/fetch_assets.py --dest assets $(if $(filter 1,$(ASSETS)),--yes,) || true
+endif
+endif
+	@for f in $(ASSET_FILES); do \
+	    if [ -f "$$f" ]; then printf '%s %s\n' "$$f" "$$(wc -c < "$$f")"; fi; \
+	done > $@.tmp
+	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@; fi
+
 
 # --- The writable volume ---
 #
@@ -356,14 +381,16 @@ endif
 # from what actually arrived rather than from a constant -- the fetch is
 # optional and may be declined, in which case this stays the small
 # writable disk it has always been.
-$(DATA):
+#
+# The fetch happens in the prerequisite below rather than here, and the
+# reason is worth naming: make expands a whole recipe before running any
+# line of it, so a `$(wildcard assets/wiki.zim)` written here would be
+# evaluated while assets/ was still empty. The shell loop below reads the
+# filesystem when it runs and so is immune, but depending on the *list*
+# is what makes a disk built before the encyclopedia arrived rebuild
+# itself once it does.
+$(DATA): $(ASSET_LIST)
 	@mkdir -p build
-ifneq ($(DISK_PRESENT),yes)
-ifneq ($(ASSETS),0)
-	@echo "  no sibling x86_64 volume — the encyclopedia and the model go here"
-	@python3 tools/fetch_assets.py --dest assets $(if $(filter 1,$(ASSETS)),--yes,) || true
-endif
-endif
 	@set -e; \
 	files=""; \
 	for f in assets/wiki.zim assets/qwen2.gguf; do \
