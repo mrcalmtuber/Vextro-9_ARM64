@@ -333,9 +333,10 @@ brew install aarch64-elf-gcc aarch64-elf-binutils xorriso qemu
 
 On Linux, `xorriso` and `qemu-system-arm` are packaged; the toolchain
 generally is not, and `gcc-aarch64-linux-gnu` is *not* a substitute — it
-targets Linux rather than bare metal. `python3` builds the disk image;
-**`ffmpeg` is optional** and only makes the boot animation. `make` names
-everything missing at once rather than stopping at the first one.
+targets Linux rather than bare metal. `python3` builds the disk image, and
+nothing else is needed: the boot animation is computed by the kernel
+rather than decoded from a video. `make` names everything missing at once
+rather than stopping at the first one.
 
 ```sh
 make            # kernel + UEFI ISO + the writable volume

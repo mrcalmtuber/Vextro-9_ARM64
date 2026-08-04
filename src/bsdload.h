@@ -24,11 +24,32 @@
  * the base of the application window.
  */
 
-/* The window's backing store. 2 MB-aligned so a single block descriptor
- * can map it; see mmio_map_init(). */
-
-static uint8_t app_region[APP_WINDOW_SIZE]
-    __attribute__((aligned(APP_WINDOW_SIZE)));
+/*
+ * The window's backing store.
+ *
+ * mmio_map_init() maps this with a single 2 MB block descriptor, and a
+ * block descriptor's output address has no low bits: the *physical*
+ * address must be 2 MB aligned or the mapping is malformed.
+ *
+ * Asking the compiler for that alignment is the obvious way to get it and
+ * the wrong one. It aligns the whole .bss section to 2 MB, so the linker
+ * gives that segment a file offset of 0x200000 -- and Limine checks
+ * p_offset against the size of the file it is loading. It only ever
+ * worked because 18 MB of boot animation used to pad the kernel past that
+ * point. The moment the animation became code instead of data, a
+ * half-megabyte kernel had a segment beginning a megabyte and a half
+ * beyond its own end, and the loader refused it:
+ *
+ *     PANIC: elf: p_offset + p_filesz exceeds file size
+ *
+ * So the alignment is taken by hand, out of a buffer twice the size, and
+ * taken on the physical address rather than the virtual one because that
+ * is the one the descriptor holds. .bss occupies nothing in the file,
+ * which is what makes the spare 2 MB free, and the section is left at
+ * page alignment where it belongs.
+ */
+static uint8_t  app_region_store[2 * APP_WINDOW_SIZE];
+static uint8_t *app_region = app_region_store;
 
 /* ===== import resolution =====
  *
@@ -101,7 +122,11 @@ static const char *app_err = "";
 static volatile int app_running = 0;
 
 static void app_region_init(void) {
-    app_region_phys = virt_to_phys(app_region);
+    const uint64_t base = virt_to_phys(app_region_store);
+    const uint64_t want = (base + (APP_WINDOW_SIZE - 1))
+                          & ~(uint64_t)(APP_WINDOW_SIZE - 1);
+    app_region      = app_region_store + (want - base);
+    app_region_phys = want;
 }
 
 /*

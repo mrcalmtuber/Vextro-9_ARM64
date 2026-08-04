@@ -19,7 +19,7 @@
 #include "desktop.h"
 #include "ttf.h"
 #include "login.h"
-#include "boot_animation.h"
+#include "bootanim.h"
 
 /*
  * Socrates BSD 9 for ARM64.
@@ -706,42 +706,20 @@ static void fill_rect(uint32_t w, uint32_t x, uint32_t y,
 static void display_boot_animation(volatile uint32_t *vram,
                                    uint32_t scr_w, uint32_t scr_h,
                                    uint32_t pitch_px) {
-    uint32_t scale_x = scr_w / BOOT_ANIM_W;
-    uint32_t scale_y = scr_h / BOOT_ANIM_H;
-    uint32_t scale = scale_x < scale_y ? scale_x : scale_y;
-    if (scale == 0) scale = 1;
-
-    uint32_t dst_w = BOOT_ANIM_W * scale;
-    uint32_t dst_h = BOOT_ANIM_H * scale;
-    uint32_t off_x = (scr_w - dst_w) / 2;
-    uint32_t off_y = (scr_h - dst_h) / 2;
-
-    const uint16_t *frames = (const uint16_t *)boot_anim_data;
+    ba_init((int)scr_w, (int)scr_h);
 
     for (uint32_t i = 0; i < scr_w * scr_h; i++) backbuf[i] = 0;
 
     /* 24 fps, measured against the architected counter rather than a
-     * programmed one-shot — no PIT to set up and no channel to gate. */
+     * programmed one-shot — no PIT to set up and no channel to gate. The
+     * deadline is advanced from the previous one rather than from now, so
+     * the time spent drawing a frame comes out of that frame's budget
+     * instead of being added to it. */
     uint64_t frame_ticks = timer_hz() / 24;
     uint64_t next = timer_count();
 
-    for (uint32_t f = 0; f < BOOT_ANIM_FRAME_COUNT; f++) {
-        const uint16_t *src = frames + f * BOOT_ANIM_W * BOOT_ANIM_H;
-
-        for (uint32_t sy = 0; sy < BOOT_ANIM_H; sy++) {
-            for (uint32_t sx = 0; sx < BOOT_ANIM_W; sx++) {
-                uint16_t c = src[sy * BOOT_ANIM_W + sx];
-                uint32_t r = (c >> 11) & 0x1F;
-                uint32_t g = (c >> 5)  & 0x3F;
-                uint32_t b = c & 0x1F;
-                uint32_t pixel = (r << 19) | (g << 10) | (b << 3);
-
-                for (uint32_t dy = 0; dy < scale; dy++)
-                    for (uint32_t dx = 0; dx < scale; dx++)
-                        backbuf[(off_y + sy * scale + dy) * scr_w +
-                                (off_x + sx * scale + dx)] = pixel;
-            }
-        }
+    for (int f = 0; f < BA_FRAMES; f++) {
+        ba_render(backbuf, (int)scr_w, f);
         vga_flip(vram, scr_w, scr_h, pitch_px);
 
         next += frame_ticks;

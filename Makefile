@@ -76,9 +76,6 @@ $(info           gcc-aarch64-linux-gnu targets Linux rather than bare)
 $(info           metal, so it is not a substitute -- build an elf)
 $(info           toolchain, or point CC and LD at one you already have.)
 $(info )
-$(info   ffmpeg is optional. Without it the boot animation is skipped and)
-$(info   the system boots straight to the login screen.)
-$(info )
 $(error missing build tools)
 endif
 endif
@@ -169,21 +166,12 @@ FORCE:
 # just had.
 all: os.iso $(DATA)
 
-# --- Boot animation: video -> raw RGB565 + header ---
-build/boot_anim.raw kernel/include/boot_animation.h: boot.mp4 tools/convert_video.py
-	@mkdir -p build kernel/include
-	python3 tools/convert_video.py boot.mp4 build/boot_anim.raw kernel/include/boot_animation.h
-
-build/boot_animation_data.o: src/boot_animation_data.S build/boot_anim.raw
-	@mkdir -p build
-	$(CC) $(CFLAGS) -c $< -o $@
-
 # --- Kernel ---
 build/vectors.o: src/vectors.S
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c $< -o $@
 
-build/kernel.o: src/kernel.c $(wildcard src/*.h) kernel/include/boot_animation.h build/res.stamp
+build/kernel.o: src/kernel.c $(wildcard src/*.h) build/res.stamp
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c $< -o $@
 
@@ -238,8 +226,8 @@ build/llm.o: src/llm.c $(wildcard src/*.h)
 	@mkdir -p build
 	$(CC) $(LLM_CFLAGS) -c $< -o $@
 
-build/kernel: build/kernel.o build/llm.o build/vectors.o build/boot_animation_data.o build/hello_bsd_data.o linker.ld
-	$(LD) $(LDFLAGS) build/kernel.o build/llm.o build/vectors.o build/boot_animation_data.o build/hello_bsd_data.o -o $@
+build/kernel: build/kernel.o build/llm.o build/vectors.o build/hello_bsd_data.o linker.ld
+	$(LD) $(LDFLAGS) build/kernel.o build/llm.o build/vectors.o build/hello_bsd_data.o -o $@
 
 # --- ISO root ---
 build/res.stamp: FORCE
