@@ -321,6 +321,47 @@ rather than a slow one.
 
 ---
 
+## First light, and the bug it uncovered
+
+<p align="center">
+  <img src="docs/boot.png" width="88%" alt="The boot animation on aarch64: a sheet of liquid glass sliding across the Socrates mark">
+</p>
+
+The boot animation is computed rather than played back — a sheet of liquid
+glass sliding across the mark, four travelling waves warped through one
+another, integer throughout. `src/bootanim.h` is **byte-identical to the
+x86_64 tree's**; only the presentation loop differs, because this one
+composes into `backbuf` and paces on the architected counter rather than a
+programmed one-shot. It replaced 18.5 MB of raw RGB565 frames and a 6.8 MB
+`.mp4`, and took the ISO from 22 MB to **4.2 MB**.
+
+Deleting those frames is what made this tree stop booting.
+
+`app_region` asked the compiler for 2 MB alignment, because `mmio_map_init`
+maps the window with a **single block descriptor** and a block descriptor's
+output address has no low bits. But `aligned(2 MB)` on an object aligns the
+whole `.bss` *section*, so the linker gave that segment a file offset of
+`0x200000` — and Limine checks `p_offset` against the size of the file it is
+loading:
+
+```
+PANIC: elf: p_offset + p_filesz exceeds file size
+```
+
+It had always been wrong. It had never mattered, because 18 MB of boot
+animation padded the kernel past `0x200000` and the offset landed inside the
+file by accident. The moment the animation became code instead of data, a
+half-megabyte kernel had a segment beginning a megabyte and a half beyond
+its own end.
+
+The alignment is load-bearing and stays. It is taken by hand now, out of a
+buffer twice the size, and taken on the **physical** address rather than the
+virtual one — that is the one the descriptor holds. `.bss` occupies nothing
+in the file, so the spare 2 MB costs nothing, and the section is left at page
+alignment where it belongs: offset `0x2000` instead of `0x200000`.
+
+---
+
 ## Running it
 
 This needs an **`aarch64-elf` cross toolchain** — a bare-metal kernel
