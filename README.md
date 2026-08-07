@@ -535,13 +535,19 @@ brackets that call instead.
 ## What is not here
 
 No 3D graphics API — the framebuffer path is 2D only. No video or audio
-codecs. No hypervisor, so no virtualised legacy environment. No TLS, so
-`https://` is refused rather than faked. No disk encryption, no
-application sandboxing: `.bsd` applications run with full kernel
-privileges in a shared address space, so the account system buys identity
-and separate workspaces and is **not** a security boundary. No
-anti-malware, no device management, no biometrics, no multi-touch, no TV
-tuner, no media streaming.
+codecs, and no audio device on this port at all. No hypervisor, so no
+virtualised legacy environment. No TLS, so `https://` is refused rather
+than faked. No device management, no biometrics, no multi-touch, no TV
+tuner, no media streaming — this configuration exposes none of the
+hardware they would need.
+
+Directories can be sealed into encrypted containers, and this account's
+home directory can be backed up encrypted, but the volume itself is not
+encrypted: filenames and free space are in the clear. There is an allow
+list and a scanner, and both decide whether a program *starts*; nothing
+constrains one that is running. `.bsd` applications execute with full
+kernel privileges in a shared address space, so the account system buys
+identity and separate workspaces and is **not** a security boundary.
 
 ---
 
