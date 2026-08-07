@@ -120,6 +120,12 @@ static uint32_t backbuf[BUF_MAX_W * BUF_MAX_H];
 static uint32_t prevbuf[BUF_MAX_W * BUF_MAX_H];
 static int      prev_valid = 0;
 static uint64_t present_px = 0;      /* pixels handed to the scanout   */
+
+/* Short accumulators for the desktop busy meter, averaged four times a
+ * second -- the 120-frame serial report is far too coarse for something
+ * being watched on screen. */
+static uint64_t busy_acc = 0, idle_acc = 0;
+static uint32_t busy_frames = 0;
 static uint32_t present_n  = 0;      /* frames counted                 */
 
 #define COLOR_BLACK 0x000000u
@@ -1470,6 +1476,7 @@ void kmain(void) {
 #endif
             sys_ticks = (uint32_t)(timer_ms() * 60ULL / 1000ULL);
 
+            const uint64_t bm_t0 = timer_count();
             desktop_render(backbuf, w, h, mouse_x, mouse_y, mouse_buttons);
 
 #ifdef AUTO_BROWSER
@@ -1543,8 +1550,28 @@ void kmain(void) {
                 serial_put_u64(ms ? (120 * 1000) / ms : 0);
                 serial_puts(" fps)\n");
             }
+
+            /*
+             * Busy against idle for the System gadget. The measurement
+             * brackets the wait rather than the work, because what the
+             * meter reports is the share of each frame the machine could
+             * not spend waiting -- and on this port the wait is
+             * timer_wait_until, not an interrupt.
+             *
+             * Averaged over 15 frames so the bar moves four times a
+             * second instead of flickering at the frame rate.
+             */
+            const uint64_t bm_t2 = timer_count();
             next_frame += frame_ticks;
             timer_wait_until(next_frame);
+            busy_acc += bm_t2 - bm_t0;
+            idle_acc += timer_count() - bm_t2;
+            if (++busy_frames >= 15) {
+                sys_busy_record((uint32_t)(busy_acc / busy_frames),
+                                (uint32_t)(idle_acc / busy_frames));
+                busy_acc = idle_acc = 0;
+                busy_frames = 0;
+            }
             continue;
         }
 
