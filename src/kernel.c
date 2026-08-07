@@ -958,6 +958,9 @@ void kmain(void) {
         store_init();
 
         users_load();
+    /* Policy lives beside the accounts and is enforced in the loader, so
+     * it has to be in memory before anything can be launched. */
+    policy_load();
         if (user_count == 0 && users_migrate_keycode())
             serial_puts("[vextro/arm64] users: migrated /keycode.sys\n");
 

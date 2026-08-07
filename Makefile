@@ -147,9 +147,17 @@ build/fdt_test: tools/fdt_test.c src/fdt.h
 	@mkdir -p build
 	cc -O2 -Wall -Wextra -o $@ $<
 
-test: build/fdt_test build/wikidoc_test
+test: build/fdt_test build/wikidoc_test build/crypto_test
 	./build/fdt_test tools/testdata/bcm2711-rpi-4-b.dtb tools/testdata/qemu-virt.dtb
 	@./build/wikidoc_test
+	@./build/crypto_test
+
+# The cipher is checked against the RFC's published vectors, not against
+# itself: an implementation that is merely self-consistent round-trips
+# perfectly and protects nothing.
+build/crypto_test: tools/crypto_test.c src/chacha20.h src/sha256.h
+	@mkdir -p build
+	@cc -O1 -Wall -Wextra -std=gnu11 -Wno-unused-function -o $@ $<
 
 # The article layout engine is pure computation over a byte buffer, so it
 # runs on the host -- the property it exists for, that a link must not end
