@@ -712,7 +712,7 @@ static void mmio_map_init(void) {
      * permissions it declares, so the kernel's data segments are mapped
      * execute-never and a jump into one faults. Rather than weaken the
      * kernel's own mapping, this maps a separate window as executable and
-     * leaves everything else alone — the W^X property the .bsd format
+     * leaves everything else alone — the W^X property the .vx format
      * exists to preserve is worth more than the two lines it costs here.
      *
      * The backing store is still a .bss array; only the view is

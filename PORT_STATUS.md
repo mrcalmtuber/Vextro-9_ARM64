@@ -12,7 +12,7 @@ untouched and unaffected.
 | M2 | Input — keyboard and pointer | done |
 | M3 | Storage — virtio-blk, exFAT | done (PCIe ECAM not needed, see below) |
 | M4 | Network — virtio-net, TCP/IP, HTTP, browser | done |
-| M5 | Userland — aarch64 `.bsd`, `svc #0` | done |
+| M5 | Userland — aarch64 `.vx`, `svc #0` | done |
 | M6 | Model and Wikipedia | done (see the speed caveat) |
 | M7 | Real hardware | device tree done and tested against a real Pi blob; Pi drivers written, untested on hardware (see below) |
 
@@ -20,7 +20,7 @@ Boot animation plays, the login screen renders and animates at a locked
 **60 fps**, typing fills the password field, the pointer tracks the host
 cursor absolutely, the 8 GB exFAT volume mounts and lists, and the network
 stack pings its gateway and fetches a real page over HTTP. An aarch64
-`.bsd` application loads, runs, and calls back into the kernel through
+`.vx` application loads, runs, and calls back into the kernel through
 `svc #0` — and the x86_64 build of the same program is refused.
 
 The desktop is wired up: logging in brings up the window manager, dock,

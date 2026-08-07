@@ -15,7 +15,7 @@
 #include "netstack.h"
 #include "igpu.h"
 #include "llm.h"
-#include "bsdload.h"
+#include "vxload.h"
 #include "desktop.h"
 #include "ttf.h"
 #include "login.h"
@@ -739,7 +739,7 @@ static void display_boot_animation(volatile uint32_t *vram,
 /*
  * What applications may borrow from the kernel.
  *
- * Defined here rather than in bsdload.h because that header is included
+ * Defined here rather than in vxload.h because that header is included
  * before ttf.h and gfx.h, so none of these names exist yet at that point.
  * The loader holds a pointer and this fills it in once everything is
  * declared.
@@ -748,7 +748,7 @@ static void display_boot_animation(volatile uint32_t *vram,
  * large enough that statically linking it into every application would be
  * absurd, and the one an application is most likely to want.
  */
-static const bsd_export_t kernel_exports[] = {
+static const vx_export_t kernel_exports[] = {
     { "ttf_draw_string", (uint64_t)(uintptr_t)ttf_draw_string },
     { "ttf_text_width",  (uint64_t)(uintptr_t)ttf_text_width  },
     { "gfx_rect",        (uint64_t)(uintptr_t)gfx_rect        },
@@ -801,7 +801,7 @@ void kmain(void) {
     const void *dtb = dtb_request.response ? dtb_request.response->dtb_ptr : 0;
     fdt_discover(dtb);
 
-    bsd_set_exports(kernel_exports);
+    vx_set_exports(kernel_exports);
     app_region_init();
     mmio_map_init();
 
@@ -1006,24 +1006,24 @@ void kmain(void) {
      * and to draw. Nothing about hello.c changed to get here; only the
      * header it includes and the linker script it uses.
      */
-    extern const uint8_t hello_bsd[], hello_bsd_end[];
-    uint64_t hello_len = (uint64_t)(hello_bsd_end - hello_bsd);
-    serial_puts("[vextro/arm64] .bsd: running embedded app, ");
+    extern const uint8_t hello_bsd[], hello_vx_end[];
+    uint64_t hello_len = (uint64_t)(hello_vx_end - hello_bsd);
+    serial_puts("[vextro/arm64] .vx: running embedded app, ");
     serial_put_u64(hello_len);
     serial_puts(" bytes\n");
-    if (bsd_exec(hello_bsd, hello_len) != 0) {
-        serial_puts("[vextro/arm64] .bsd: refused - ");
+    if (vx_exec(hello_bsd, hello_len) != 0) {
+        serial_puts("[vextro/arm64] .vx: refused - ");
         serial_puts(app_err);
         serial_puts("\n");
     } else {
-        serial_puts("[vextro/arm64] .bsd: app returned cleanly\n");
+        serial_puts("[vextro/arm64] .vx: app returned cleanly\n");
         /* Count what sys_draw_pixel actually put in the back buffer. The
          * serial output proves the app ran; this proves its drawing
          * reached the same memory the compositor presents. */
         uint32_t gold = 0;
         for (uint32_t i = 0; i < w * h; i++)
             if (backbuf[i] == 0xD4AF37u) gold++;
-        serial_puts("[vextro/arm64] .bsd: app drew ");
+        serial_puts("[vextro/arm64] .vx: app drew ");
         serial_put_u64(gold);
         serial_puts(" pixels into the back buffer\n");
     }
@@ -1046,13 +1046,13 @@ void kmain(void) {
              * argument and returns 0 for success — not the byte count. */
             uint32_t got = 0;
             if (exf_read_file(&d, foreign, sizeof(foreign), &got) == 0 && got) {
-                serial_puts("[vextro/arm64] .bsd: trying the x86_64 image from disk\n");
-                if (bsd_exec(foreign, (uint64_t)got) != 0) {
-                    serial_puts("[vextro/arm64] .bsd: correctly refused - ");
+                serial_puts("[vextro/arm64] .vx: trying the x86_64 image from disk\n");
+                if (vx_exec(foreign, (uint64_t)got) != 0) {
+                    serial_puts("[vextro/arm64] .vx: correctly refused - ");
                     serial_puts(app_err);
                     serial_puts("\n");
                 } else {
-                    serial_puts("[vextro/arm64] .bsd: WRONG - ran a foreign image\n");
+                    serial_puts("[vextro/arm64] .vx: WRONG - ran a foreign image\n");
                 }
             }
         }

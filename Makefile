@@ -16,7 +16,7 @@ LD   := aarch64-elf-ld
 # translation unit is the single exception and is built without it.
 CFLAGS := -O2 -Wall -Wextra -ffreestanding -fno-stack-protector \
           -fno-stack-check -fno-lto -fno-pie -mgeneral-regs-only \
-          -Isrc -Ikernel/include -Ibsdfmt $(EXTRA)
+          -Isrc -Ikernel/include -Ivxfmt $(EXTRA)
 
 # Linked as a plain ET_EXEC at a fixed higher-half address, not a PIE.
 #
@@ -189,18 +189,18 @@ build/kernel.o: src/kernel.c $(wildcard src/*.h) build/res.stamp
 # `svc #0` instead of `int $0x80`, but hello.c itself is unchanged: the
 # syscall numbers and their argument meanings are the same on both
 # architectures, so only the header that reaches them differs.
-build/bsd_maker: bsdfmt/bsd_maker.c
+build/vx_maker: vxfmt/vx_maker.c
 	@mkdir -p build
 	cc -O2 -o $@ $<
 
-build/hello.bsd: apps/hello.c apps/vextro.h apps/app.ld build/bsd_maker
+build/hello.vx: apps/hello.c apps/vextro.h apps/app.ld build/vx_maker
 	@mkdir -p build
 	$(CC) $(CFLAGS) -Iapps -nostdlib -c apps/hello.c -o build/hello.o
 	$(LD) -nostdlib -no-pie -T apps/app.ld build/hello.o -o build/hello.elf
 	aarch64-elf-objcopy -O binary build/hello.elf build/hello.bin
-	./build/bsd_maker -o $@ -t build/hello.bin --text-vaddr 0x1000 --entry 0x1000
+	./build/vx_maker -o $@ -t build/hello.bin --text-vaddr 0x1000 --entry 0x1000
 
-build/hello_bsd_data.o: src/hello_bsd_data.S build/hello.bsd
+build/hello_vx_data.o: src/hello_vx_data.S build/hello.vx
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c $< -o $@
 
@@ -228,14 +228,14 @@ build/hello_bsd_data.o: src/hello_bsd_data.S build/hello.bsd
 # Paying determinism for nothing is a bad trade.
 LLM_CFLAGS := -O3 -Wall -Wextra -ffreestanding \
               -fno-stack-protector -fno-stack-check -fno-lto -fno-pie \
-              -Isrc -Ikernel/include -Ibsdfmt $(EXTRA)
+              -Isrc -Ikernel/include -Ivxfmt $(EXTRA)
 
 build/llm.o: src/llm.c $(wildcard src/*.h)
 	@mkdir -p build
 	$(CC) $(LLM_CFLAGS) -c $< -o $@
 
-build/kernel: build/kernel.o build/llm.o build/vectors.o build/hello_bsd_data.o linker.ld
-	$(LD) $(LDFLAGS) build/kernel.o build/llm.o build/vectors.o build/hello_bsd_data.o -o $@
+build/kernel: build/kernel.o build/llm.o build/vectors.o build/hello_vx_data.o linker.ld
+	$(LD) $(LDFLAGS) build/kernel.o build/llm.o build/vectors.o build/hello_vx_data.o -o $@
 
 # --- ISO root ---
 build/res.stamp: FORCE

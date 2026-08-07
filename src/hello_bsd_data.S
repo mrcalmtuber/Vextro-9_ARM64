@@ -13,10 +13,10 @@
 .balign 16
 .global hello_bsd
 hello_bsd:
-    .incbin "build/hello.bsd"
-.global hello_bsd_end
-hello_bsd_end:
-.global hello_bsd_len
+    .incbin "build/hello.vx"
+.global hello_vx_end
+hello_vx_end:
+.global hello_vx_len
 .balign 8
-hello_bsd_len:
-    .quad hello_bsd_end - hello_bsd
+hello_vx_len:
+    .quad hello_vx_end - hello_bsd

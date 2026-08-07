@@ -175,7 +175,7 @@ they cost nothing and are implied. Here every one needs a `dsb` — cheap to
 add, genuinely nasty to debug if missed, because the symptom is a device
 that works under `tcg` and fails under `hvf`.
 
-The `.bsd` loader pays the same tax in a different currency: instruction and
+The `.vx` loader pays the same tax in a different currency: instruction and
 data caches are not coherent, so freshly written code needs `dc cvau` then
 `ic ivau` before anything can jump to it.
 
@@ -445,7 +445,7 @@ remains a fallback, but EDK2's ramfb driver offers three modes topping out
 at 1024x768 — and asking for more does not degrade to the next one, it drops
 to 800x600.
 
-`.bsd` images declare their architecture in the fourth magic byte — `0xAA`
+`.vx` images declare their architecture in the fourth magic byte — `0xAA`
 here, `0x64` on x86_64 — so each kernel refuses the other's binaries at the
 first check rather than executing them as instructions they are not.
 
@@ -473,7 +473,7 @@ src/
   mbox.h        VideoCore property mailbox
   pifb.h        Firmware framebuffer, via the mailbox
   keyboard.h    Ring buffer + scancode tables (no ISR, no port I/O)
-  bsdload.h     .bsd loader — executable window, I-cache maintenance
+  vxload.h     .vx loader — executable window, I-cache maintenance
   igpu.h        Inert: no integrated GPU on this machine
 
   *_x86.h.ref   The x86_64 originals, kept alongside for comparison
@@ -504,7 +504,7 @@ what each one cost, and what the original plan got wrong.
 | M2 | Keyboard + absolute pointer | host `(0.75, 0.70)` arrives as `599,419` |
 | M3 | virtio-blk + exFAT | 8 GB volume mounts; real root listing |
 | M4 | virtio-net + TCP/IP + browser | ICMP 4/4; `HTTP 200`, page renders |
-| M5 | aarch64 `.bsd` + `svc #0` | app runs; the x86_64 image is refused |
+| M5 | aarch64 `.vx` + `svc #0` | app runs; the x86_64 image is refused |
 | M6 | Model + offline Wikipedia | ZIM v6, 399,853 entries; the model answers |
 | M7 | Device tree + Raspberry Pi | 19 parser checks against real blobs; drivers written, **not run on a Pi** |
 
@@ -545,7 +545,7 @@ Directories can be sealed into encrypted containers, and this account's
 home directory can be backed up encrypted, but the volume itself is not
 encrypted: filenames and free space are in the clear. There is an allow
 list and a scanner, and both decide whether a program *starts*; nothing
-constrains one that is running. `.bsd` applications execute with full
+constrains one that is running. `.vx` applications execute with full
 kernel privileges in a shared address space, so the account system buys
 identity and separate workspaces and is **not** a security boundary.
 

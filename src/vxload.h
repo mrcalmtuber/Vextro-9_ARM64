@@ -1,12 +1,12 @@
-#ifndef BSDLOAD_H
-#define BSDLOAD_H
+#ifndef VXLOAD_H
+#define VXLOAD_H
 
 #include <stdint.h>
 #include "arm.h"
-#include "bsd_format.h"
+#include "vx_format.h"
 
 /*
- * Loading and running a .bsd image on aarch64.
+ * Loading and running a .vx image on aarch64.
  *
  * The format needed one change to come across: its fourth magic byte is
  * the architecture, so aarch64 images say 0xAA where x86_64 images say
@@ -54,14 +54,14 @@ static uint8_t *app_region = app_region_store;
 /* ===== import resolution =====
  *
  * Set by the kernel once everything it exports has been declared —
- * bsdload.h is included before ttf.h, so the table cannot be built here.
+ * vxload.h is included before ttf.h, so the table cannot be built here.
  */
-static const bsd_export_t *bsd_exports = 0;
+static const vx_export_t *vx_exports = 0;
 
-static void bsd_set_exports(const bsd_export_t *table) { bsd_exports = table; }
+static void vx_set_exports(const vx_export_t *table) { vx_exports = table; }
 
-static int bsd_name_eq(const char *a, const char *b) {
-    for (int i = 0; i < BSD_IMPORT_NAMELEN; i++) {
+static int vx_name_eq(const char *a, const char *b) {
+    for (int i = 0; i < VX_IMPORT_NAMELEN; i++) {
         if (a[i] != b[i]) return 0;
         if (a[i] == '\0') return 1;
     }
@@ -80,31 +80,31 @@ static int bsd_name_eq(const char *a, const char *b) {
  * An image with no table at all is not an error — that is every image
  * that existed before this — so it returns zero.
  */
-static int bsd_resolve_imports(uint8_t *data, uint64_t len) {
-    if (!data || len < sizeof(bsd_import_hdr_t)) return 0;
+static int vx_resolve_imports(uint8_t *data, uint64_t len) {
+    if (!data || len < sizeof(vx_import_hdr_t)) return 0;
 
-    uint64_t limit = len - sizeof(bsd_import_hdr_t);
+    uint64_t limit = len - sizeof(vx_import_hdr_t);
     for (uint64_t off = 0; off <= limit; off += 8) {
-        bsd_import_hdr_t *hdr = (bsd_import_hdr_t *)(data + off);
-        if (hdr->magic != BSD_IMPORT_MAGIC) continue;
+        vx_import_hdr_t *hdr = (vx_import_hdr_t *)(data + off);
+        if (hdr->magic != VX_IMPORT_MAGIC) continue;
 
-        if (hdr->count == 0 || hdr->count > BSD_IMPORT_MAX) return -1;
+        if (hdr->count == 0 || hdr->count > VX_IMPORT_MAX) return -1;
 
         /* The entries must lie wholly inside the segment. A count that
          * overruns is the one way this can be turned into a write past
          * the image, so it is checked before anything is written. */
-        uint64_t need = sizeof(bsd_import_hdr_t) +
-                        (uint64_t)hdr->count * sizeof(bsd_import_t);
+        uint64_t need = sizeof(vx_import_hdr_t) +
+                        (uint64_t)hdr->count * sizeof(vx_import_t);
         if (need > len - off) return -1;
 
-        bsd_import_t *e = (bsd_import_t *)(data + off + sizeof(bsd_import_hdr_t));
+        vx_import_t *e = (vx_import_t *)(data + off + sizeof(vx_import_hdr_t));
         int found = 0;
         for (uint32_t i = 0; i < hdr->count; i++) {
             e[i].addr = 0;
-            if (!bsd_exports) continue;
-            for (int k = 0; bsd_exports[k].name; k++) {
-                if (bsd_name_eq(e[i].name, bsd_exports[k].name)) {
-                    e[i].addr = bsd_exports[k].addr;
+            if (!vx_exports) continue;
+            for (int k = 0; vx_exports[k].name; k++) {
+                if (vx_name_eq(e[i].name, vx_exports[k].name)) {
+                    e[i].addr = vx_exports[k].addr;
                     found++;
                     break;
                 }
@@ -135,21 +135,21 @@ static void app_region_init(void) {
  * Returns 0 when the app ran to completion. The app shares this kernel's
  * exception level and stack: there is no separate address space to switch
  * to and nothing to schedule against, which matches how the x86 build
- * runs .bsd images through int $0x80 rather than a ring transition. EL0
+ * runs .vx images through int $0x80 rather than a ring transition. EL0
  * is where this goes when there is a reason for it — a second process, or
  * an app that should not be able to reach kernel memory — and the syscall
  * path already handles being entered from a lower EL.
  */
-static int bsd_exec(const uint8_t *file, uint64_t len) {
+static int vx_exec(const uint8_t *file, uint64_t len) {
     app_err = "";
 
-    if (len < sizeof(bsd_header_t)) { app_err = "file smaller than header"; return -1; }
-    const bsd_header_t *h = (const bsd_header_t *)file;
+    if (len < sizeof(vx_header_t)) { app_err = "file smaller than header"; return -1; }
+    const vx_header_t *h = (const vx_header_t *)file;
 
-    const char *why = bsd_validate(h, len);
+    const char *why = vx_validate(h, len);
     if (why) { app_err = why; return -1; }
 
-    uint64_t span = bsd_image_span(h);
+    uint64_t span = vx_image_span(h);
     if (span > APP_WINDOW_SIZE) { app_err = "image larger than the app window"; return -1; }
     if (!app_region_phys)       { app_err = "app window not mapped"; return -1; }
 
@@ -181,8 +181,8 @@ static int bsd_exec(const uint8_t *file, uint64_t len) {
      *
      * That this can write into the text image is specific to how this
      * kernel maps applications: one window, readable, writable and
-     * executable together, because the .bsd format carries no relocations
-     * and needs no separate protections. The POSIX loader in bsdfmt does
+     * executable together, because the .vx format carries no relocations
+     * and needs no separate protections. The POSIX loader in vxfmt does
      * enforce W^X per segment, so an image meant to run under both must
      * put its table somewhere writable there.
      *
@@ -190,13 +190,13 @@ static int bsd_exec(const uint8_t *file, uint64_t len) {
      * through the data mapping and the clean-to-unification that follows
      * is what makes them visible to the fetch side.
      */
-    int nimp = bsd_resolve_imports(base, span);
+    int nimp = vx_resolve_imports(base, span);
     if (nimp < 0) {
-        serial_puts("[vextro/arm64] .bsd: malformed import table\n");
+        serial_puts("[vextro/arm64] .vx: malformed import table\n");
         return -1;
     }
     if (nimp > 0) {
-        serial_puts("[vextro/arm64] .bsd: resolved ");
+        serial_puts("[vextro/arm64] .vx: resolved ");
         serial_put_u64((uint64_t)nimp);
         serial_puts(" imported symbols\n");
     }
@@ -228,4 +228,4 @@ static int bsd_exec(const uint8_t *file, uint64_t len) {
 }
 
 
-#endif /* BSDLOAD_H */
+#endif /* VXLOAD_H */
