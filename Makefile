@@ -348,12 +348,18 @@ assets:
 		$(if $(filter 1,$(ASSETS)),--yes,)
 	@rm -f $(ASSET_LIST)
 
-DISK    ?= ../Vextro 9/disk.img
+# The x86_64 tree's directory name is not the operating system's name and
+# did not change when the system was renamed -- the rebrand rewrote this
+# to a folder that does not exist. Look for the file, do not assume the
+# spelling of the folder.
+DISK    ?= $(shell for d in "../Socrates BSD 9" "../Vextro 9" "../Vextro"; do \
+                       if [ -f "$$d/disk.img" ]; then echo "$$d/disk.img"; break; fi; \
+                   done)
 DISK_RO ?= off
 
 # $(wildcard) cannot be used here, and the reason is a trap worth naming:
 # it splits its argument on whitespace and the default path has spaces in
-# it, so `$(wildcard ../Vextro 9/disk.img)` looks for three separate
+# it, so `$(wildcard ../Socrates BSD 9/disk.img)` looks for three separate
 # files, matches none, and quietly decides there is no disk. `make run`
 # therefore booted with no volume at all — no exFAT, no saved keycode, no
 # encyclopedia, no model — while the headless harness, which is Python and

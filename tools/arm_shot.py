@@ -23,7 +23,22 @@ FIRMWARE = "/opt/homebrew/share/qemu/edk2-aarch64-code.fd"
 # The volume with wiki.zim and the model. Writable now: accounts and
 # home directories live on whichever volume the system mounts, and
 # fs_mount() takes the largest, which is this one.
-DISK = os.path.join(ROOT, "..", "Vextro 9", "disk.img")
+def _shared_disk(root):
+    """The x86_64 tree's volume, wherever that tree happens to sit.
+
+    Its *directory* name is not the operating system's name and did not
+    change when the system was renamed, so the rebrand rewrote this path
+    to a folder that does not exist and the harness quietly booted with no
+    volume at all -- no exFAT, no encyclopedia, no model. Look for the
+    file instead of trusting one spelling of the folder.
+    """
+    for name in ("Socrates BSD 9", "Vextro 9", "Vextro"):
+        p = os.path.join(root, "..", name, "disk.img")
+        if os.path.exists(p):
+            return p
+    return os.path.join(root, "..", "Socrates BSD 9", "disk.img")
+
+DISK = _shared_disk(ROOT)
 
 # EDK2 keeps its variables in a second flash bank and wants one even when
 # empty. It is regenerated whenever it is missing or older than the ISO:
