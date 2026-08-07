@@ -510,6 +510,41 @@ what each one cost, and what the original plan got wrong.
 
 ---
 
+## The desktop this carries
+
+The system layer is shared with the x86_64 tree and documented there. It
+is worth saying what arrived in this port alongside the machine work,
+because it is what you actually see when it boots:
+
+A window manager with minimize, maximize, snap-to-edge and shake-to-clear;
+Aero Peek, which fades the window stack towards the wallpaper when the
+pointer reaches the taskbar; live window previews captured out of the
+compositor; jump lists of recent items; desktop gadgets for the clock, the
+system and the network; start-menu search across applications, recent
+items and the volume; an Action Center; a calculator with no floating
+point anywhere in it; and idle screen dimming.
+
+One thing is wired differently here than on x86_64, because the loop is.
+The System gadget's CPU meter measures the share of each frame the machine
+could not spend waiting — on x86 the frame ends in `hlt` and the wait is
+an interrupt, while here it ends in `timer_wait_until`, so the measurement
+brackets that call instead.
+
+---
+
+## What is not here
+
+No 3D graphics API — the framebuffer path is 2D only. No video or audio
+codecs. No hypervisor, so no virtualised legacy environment. No TLS, so
+`https://` is refused rather than faked. No disk encryption, no
+application sandboxing: `.bsd` applications run with full kernel
+privileges in a shared address space, so the account system buys identity
+and separate workspaces and is **not** a security boundary. No
+anti-malware, no device management, no biometrics, no multi-touch, no TV
+tuner, no media streaming.
+
+---
+
 ## The honest cost of a standalone copy
 
 14,710 shared lines will drift. A bug fixed in `zstd.h` or `browser.h` has
