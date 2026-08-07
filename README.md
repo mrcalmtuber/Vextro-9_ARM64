@@ -324,16 +324,21 @@ rather than a slow one.
 ## First light, and the bug it uncovered
 
 <p align="center">
-  <img src="docs/boot.png" width="88%" alt="The boot animation on aarch64: a sheet of liquid glass sliding across the Socrates mark">
+  <img src="docs/boot.png" width="88%" alt="The boot animation on aarch64: the dragon breathing fire, and the burn front eating the screen">
 </p>
 
-The boot animation is computed rather than played back — a sheet of liquid
-glass sliding across the mark, four travelling waves warped through one
-another, integer throughout. `src/bootanim.h` is **byte-identical to the
-x86_64 tree's**; only the presentation loop differs, because this one
-composes into `backbuf` and paces on the architected counter rather than a
-programmed one-shot. It replaced 18.5 MB of raw RGB565 frames and a 6.8 MB
-`.mp4`, and took the ISO from 22 MB to **4.2 MB**.
+The boot animation is computed rather than played back. The dragon off the
+desktop wallpaper draws breath and sets fire to the screen: an advected
+flame streaming from its mouth, and a separate burn front that ignites where
+the jet lands and then eats outward on its own, ember rim ahead of cold
+char. Integer throughout, on the 360-entry sine table, with no square root
+anywhere in it.
+
+`src/bootanim.h` is **byte-identical to the x86_64 tree's** — only the
+presentation loop differs, because this one composes into `backbuf` and
+paces on the architected counter rather than a programmed one-shot. It
+replaced 18.5 MB of raw RGB565 frames and a 6.8 MB `.mp4`, and took the ISO
+from 22 MB to **4.2 MB**.
 
 Deleting those frames is what made this tree stop booting.
 
