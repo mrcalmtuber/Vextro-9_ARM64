@@ -177,15 +177,15 @@ static void ata_init_at(uint32_t index) {
     vblk_base = virtio_find(VIRTIO_ID_BLOCK, index);
     if (!vblk_base) {
         if (index == 0)
-            serial_puts("[socrates/arm64] virtio-blk: no device\n");
+            serial_puts("[vextro/arm64] virtio-blk: no device\n");
         return;
     }
     if (!virtio_begin(vblk_base)) {
-        serial_puts("[socrates/arm64] virtio-blk: feature negotiation refused\n");
+        serial_puts("[vextro/arm64] virtio-blk: feature negotiation refused\n");
         return;
     }
     if (!virtq_setup(vblk_base, 0, &vblk_q, vblk_desc, &vblk_avail, &vblk_used)) {
-        serial_puts("[socrates/arm64] virtio-blk: queue 0 would not start\n");
+        serial_puts("[vextro/arm64] virtio-blk: queue 0 would not start\n");
         return;
     }
     virtio_ready(vblk_base);
@@ -196,7 +196,7 @@ static void ata_init_at(uint32_t index) {
     ata_sectors = ((uint64_t)hi << 32) | lo;
     ata_present = 1;
 
-    serial_puts("[socrates/arm64] virtio-blk ");
+    serial_puts("[vextro/arm64] virtio-blk ");
     serial_put_u64(index);
     serial_puts(": ");
     serial_put_u64(ata_sectors);

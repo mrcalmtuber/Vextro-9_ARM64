@@ -247,7 +247,7 @@ static int vtgpu_init(uint32_t want_w, uint32_t want_h) {
     vgpu_hdr(VGPU_CMD_GET_DISPLAY_INFO);
     if (vgpu_cmd(sizeof(struct vgpu_ctrl_hdr),
                  sizeof(struct vgpu_resp_display_info)) != 0) {
-        serial_puts("[socrates/arm64] virtio-gpu: display info refused\n");
+        serial_puts("[vextro/arm64] virtio-gpu: display info refused\n");
         return 0;
     }
     struct vgpu_resp_display_info *di =
@@ -268,7 +268,7 @@ static int vtgpu_init(uint32_t want_w, uint32_t want_h) {
     c->width = dw;
     c->height = dh;
     if (vgpu_cmd(sizeof(*c), sizeof(struct vgpu_ctrl_hdr)) != 0) {
-        serial_puts("[socrates/arm64] virtio-gpu: resource create refused\n");
+        serial_puts("[vextro/arm64] virtio-gpu: resource create refused\n");
         return 0;
     }
 
@@ -291,7 +291,7 @@ static int vtgpu_init(uint32_t want_w, uint32_t want_h) {
     ab->entry.length = dw * dh * 4;
     if (!ab->entry.addr ||
         vgpu_cmd(sizeof(*ab), sizeof(struct vgpu_ctrl_hdr)) != 0) {
-        serial_puts("[socrates/arm64] virtio-gpu: attach backing refused\n");
+        serial_puts("[vextro/arm64] virtio-gpu: attach backing refused\n");
         return 0;
     }
 
@@ -302,14 +302,14 @@ static int vtgpu_init(uint32_t want_w, uint32_t want_h) {
     ss->scanout_id = 0;
     ss->resource_id = 1;
     if (vgpu_cmd(sizeof(*ss), sizeof(struct vgpu_ctrl_hdr)) != 0) {
-        serial_puts("[socrates/arm64] virtio-gpu: set scanout refused\n");
+        serial_puts("[vextro/arm64] virtio-gpu: set scanout refused\n");
         return 0;
     }
 
     vgpu_w = dw; vgpu_h = dh;
     vgpu_ready = 1;
 
-    serial_puts("[socrates/arm64] virtio-gpu: scanout ");
+    serial_puts("[vextro/arm64] virtio-gpu: scanout ");
     serial_put_u64(dw); serial_puts("x"); serial_put_u64(dh);
     serial_puts("\n");
 
@@ -346,8 +346,8 @@ static int vtgpu_init(uint32_t want_w, uint32_t want_h) {
     }
 
     serial_puts(vgpu_cursor_ok
-                ? "[socrates/arm64] virtio-gpu: hardware cursor plane\n"
-                : "[socrates/arm64] virtio-gpu: no cursor queue, "
+                ? "[vextro/arm64] virtio-gpu: hardware cursor plane\n"
+                : "[vextro/arm64] virtio-gpu: no cursor queue, "
                   "compositing the pointer\n");
     return 1;
 }

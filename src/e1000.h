@@ -192,7 +192,7 @@ static void vnet_init(uint64_t hhdm_offset) {
 
     vnet_base = virtio_find(VIRTIO_ID_NET, 0);
     if (!vnet_base) {
-        serial_puts("[socrates/arm64] virtio-net: no device\n");
+        serial_puts("[vextro/arm64] virtio-net: no device\n");
         return;
     }
 
@@ -214,7 +214,7 @@ static void vnet_init(uint64_t hhdm_offset) {
     DSB();
     if (!(vio_rd(vnet_base, VIO_STATUS) & VIO_STATUS_FEATURES_OK)) {
         vio_wr(vnet_base, VIO_STATUS, VIO_STATUS_FAILED);
-        serial_puts("[socrates/arm64] virtio-net: features refused\n");
+        serial_puts("[vextro/arm64] virtio-net: features refused\n");
         return;
     }
 
@@ -222,7 +222,7 @@ static void vnet_init(uint64_t hhdm_offset) {
                      vnet_rx_desc, &vnet_rx_avail, &vnet_rx_used) ||
         !virtq_setup(vnet_base, 1, &vnet_tx,
                      vnet_tx_desc, &vnet_tx_avail, &vnet_tx_used)) {
-        serial_puts("[socrates/arm64] virtio-net: queues would not start\n");
+        serial_puts("[vextro/arm64] virtio-net: queues would not start\n");
         return;
     }
 
@@ -236,7 +236,7 @@ static void vnet_init(uint64_t hhdm_offset) {
 
     vnet_read_mac();
 
-    serial_puts("[socrates/arm64] virtio-net: up, MAC ");
+    serial_puts("[vextro/arm64] virtio-net: up, MAC ");
     static const char hx[] = "0123456789ABCDEF";
     for (int i = 0; i < 6; i++) {
         if (i) serial_putc(':');

@@ -22,7 +22,7 @@
 #include "bootanim.h"
 
 /*
- * Socrates BSD 9 for ARM64.
+ * Vextro 9 for ARM64.
  *
  * The machine now has a console, exception vectors, a time source and a
  * paced render loop, which is enough for the whole portable rendering
@@ -130,7 +130,7 @@ static uint32_t present_n  = 0;      /* frames counted                 */
  * FAT walk, directory-entry decoding — rather than just that a device
  * answered. */
 static void boot_list_entry(const char *name, uint32_t size, int is_dir) {
-    serial_puts("[socrates/arm64]   ");
+    serial_puts("[vextro/arm64]   ");
     serial_puts(is_dir ? "dir  " : "file ");
     serial_puts(name);
     if (!is_dir) {
@@ -546,7 +546,7 @@ uint64_t arm_syscall(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2) {
 #define CHK(n)                                                        \
     do {                                                              \
         if ((HALT_AT) == (n)) {                                       \
-            serial_puts("[socrates/arm64] halted at checkpoint " #n "\n"); \
+            serial_puts("[vextro/arm64] halted at checkpoint " #n "\n"); \
             halt_forever();                                           \
         }                                                             \
     } while (0)
@@ -799,7 +799,7 @@ void kmain(void) {
     app_region_init();
     mmio_map_init();
 
-    serial_puts("\n[socrates/arm64] kmain reached at EL1\n");
+    serial_puts("\n[vextro/arm64] kmain reached at EL1\n");
 
     /* Vectors first: from here on a fault says what it was instead of
      * hanging, which matters more the more driver code arrives. */
@@ -812,7 +812,7 @@ void kmain(void) {
     exceptions_init();
     timer_takeover();
     fpu_init();
-    serial_puts("[socrates/arm64] vectors installed, timer disarmed, FP on\n");
+    serial_puts("[vextro/arm64] vectors installed, timer disarmed, FP on\n");
     mmu_report();
     mmio_report();
 
@@ -860,7 +860,7 @@ void kmain(void) {
         panel_h  = pifb_h;
         pitch_px = pifb_pitch_px;
         vram     = pifb_addr;
-        serial_puts("[socrates/arm64] display: VideoCore framebuffer\n");
+        serial_puts("[vextro/arm64] display: VideoCore framebuffer\n");
     } else if (fb_request.response != NULL &&
                fb_request.response->framebuffer_count >= 1) {
         struct limine_framebuffer *fb = fb_request.response->framebuffers[0];
@@ -868,13 +868,13 @@ void kmain(void) {
         panel_h  = (uint32_t)fb->height;
         pitch_px = (uint32_t)(fb->pitch / (fb->bpp / 8));
         vram     = (volatile uint32_t *)fb->address;
-        serial_puts("[socrates/arm64] display: firmware framebuffer\n");
+        serial_puts("[vextro/arm64] display: firmware framebuffer\n");
     } else {
-        serial_puts("[socrates/arm64] no display: no virtio-gpu and no framebuffer\n");
+        serial_puts("[vextro/arm64] no display: no virtio-gpu and no framebuffer\n");
         halt_forever();
     }
 
-    serial_puts("[socrates/arm64] panel ");
+    serial_puts("[vextro/arm64] panel ");
     serial_put_u64(panel_w); serial_puts("x"); serial_put_u64(panel_h);
     serial_puts("\n");
     CHK(2);
@@ -888,7 +888,7 @@ void kmain(void) {
     uint32_t w = panel_w > BUF_MAX_W ? BUF_MAX_W : panel_w;
     uint32_t h = panel_h > BUF_MAX_H ? BUF_MAX_H : panel_h;
 
-    serial_puts("[socrates/arm64] framebuffer ");
+    serial_puts("[vextro/arm64] framebuffer ");
     serial_put_u64(panel_w); serial_puts("x"); serial_put_u64(panel_h);
     serial_puts("  timer "); serial_put_u64(timer_hz() / 1000000);
     serial_puts(" MHz\n");
@@ -911,11 +911,11 @@ void kmain(void) {
     if (blk_present()) {
         static uint8_t probe[512];
         if (blk_read(0, 1, probe) == 0) {
-            serial_puts("[socrates/arm64] sector 0 reads, boot signature ");
+            serial_puts("[vextro/arm64] sector 0 reads, boot signature ");
             serial_puts((probe[510] == 0x55 && probe[511] == 0xAA)
                         ? "present\n" : "absent\n");
         } else {
-            serial_puts("[socrates/arm64] sector 0 READ FAILED\n");
+            serial_puts("[vextro/arm64] sector 0 READ FAILED\n");
         }
 
         exfat_mount();
@@ -953,20 +953,20 @@ void kmain(void) {
 
         users_load();
         if (user_count == 0 && users_migrate_keycode())
-            serial_puts("[socrates/arm64] users: migrated /keycode.sys\n");
+            serial_puts("[vextro/arm64] users: migrated /keycode.sys\n");
 
         if (user_count == 0) {
             login_stage = LOGIN_NEW_NAME;
-            serial_puts("[socrates/arm64] users: none, first-run setup\n");
+            serial_puts("[vextro/arm64] users: none, first-run setup\n");
         } else {
             login_stage = LOGIN_PASSWORD;
             login_sel = 0;
-            serial_puts("[socrates/arm64] users: ");
+            serial_puts("[vextro/arm64] users: ");
             serial_put_u64((uint64_t)user_count);
             serial_puts(" account(s)\n");
         }
 
-        serial_puts("[socrates/arm64] exFAT: ");
+        serial_puts("[vextro/arm64] exFAT: ");
         if (exf_vol.mounted) {
             serial_puts("mounted, ");
             serial_put_u64(exf_vol.cluster_bytes);
@@ -999,22 +999,22 @@ void kmain(void) {
      */
     extern const uint8_t hello_bsd[], hello_bsd_end[];
     uint64_t hello_len = (uint64_t)(hello_bsd_end - hello_bsd);
-    serial_puts("[socrates/arm64] .bsd: running embedded app, ");
+    serial_puts("[vextro/arm64] .bsd: running embedded app, ");
     serial_put_u64(hello_len);
     serial_puts(" bytes\n");
     if (bsd_exec(hello_bsd, hello_len) != 0) {
-        serial_puts("[socrates/arm64] .bsd: refused - ");
+        serial_puts("[vextro/arm64] .bsd: refused - ");
         serial_puts(app_err);
         serial_puts("\n");
     } else {
-        serial_puts("[socrates/arm64] .bsd: app returned cleanly\n");
+        serial_puts("[vextro/arm64] .bsd: app returned cleanly\n");
         /* Count what sys_draw_pixel actually put in the back buffer. The
          * serial output proves the app ran; this proves its drawing
          * reached the same memory the compositor presents. */
         uint32_t gold = 0;
         for (uint32_t i = 0; i < w * h; i++)
             if (backbuf[i] == 0xD4AF37u) gold++;
-        serial_puts("[socrates/arm64] .bsd: app drew ");
+        serial_puts("[vextro/arm64] .bsd: app drew ");
         serial_put_u64(gold);
         serial_puts(" pixels into the back buffer\n");
     }
@@ -1037,13 +1037,13 @@ void kmain(void) {
              * argument and returns 0 for success — not the byte count. */
             uint32_t got = 0;
             if (exf_read_file(&d, foreign, sizeof(foreign), &got) == 0 && got) {
-                serial_puts("[socrates/arm64] .bsd: trying the x86_64 image from disk\n");
+                serial_puts("[vextro/arm64] .bsd: trying the x86_64 image from disk\n");
                 if (bsd_exec(foreign, (uint64_t)got) != 0) {
-                    serial_puts("[socrates/arm64] .bsd: correctly refused - ");
+                    serial_puts("[vextro/arm64] .bsd: correctly refused - ");
                     serial_puts(app_err);
                     serial_puts("\n");
                 } else {
-                    serial_puts("[socrates/arm64] .bsd: WRONG - ran a foreign image\n");
+                    serial_puts("[vextro/arm64] .bsd: WRONG - ran a foreign image\n");
                 }
             }
         }
@@ -1082,7 +1082,7 @@ void kmain(void) {
         if (best_len > (16ull << 20)) {
             llm_arena_init((void *)(uintptr_t)(hhdm_request.response->offset
                                                + best_base), best_len);
-            serial_puts("[socrates/arm64] llm arena ");
+            serial_puts("[vextro/arm64] llm arena ");
             serial_put_u64(best_len / (1024 * 1024));
             serial_puts(" MiB of ");
             serial_put_u64(total / (1024 * 1024));
@@ -1106,7 +1106,7 @@ void kmain(void) {
          * neighbouring predicates — worth stating, because reading it as
          * a boolean reports a passing FPU as broken. */
         int rc = llm_fpu_selftest(&scaled);
-        serial_puts("[socrates/arm64] llm fpu selftest ");
+        serial_puts("[vextro/arm64] llm fpu selftest ");
         serial_puts(rc == 0 ? "pass" : "FAIL");
         serial_puts(" (x10000 = ");
         serial_put_u64(scaled);
@@ -1128,9 +1128,9 @@ void kmain(void) {
      * produced rather than that it returned.
      */
     if (exf_vol.mounted) {
-        serial_puts("[socrates/arm64] m6: opening wiki.zim\n");
+        serial_puts("[vextro/arm64] m6: opening wiki.zim\n");
         if (zim_open("/wiki.zim") == 0) {
-            serial_puts("[socrates/arm64] m6: zim v");
+            serial_puts("[vextro/arm64] m6: zim v");
             serial_put_u64(zim.major);
             serial_puts(", ");
             serial_put_u64(zim.article_count);
@@ -1147,25 +1147,25 @@ void kmain(void) {
             uint32_t rank = zim.title_count > 8 ? 8 : 0;
             uint32_t idx = zim_title_at(rank);
             if (zim_content(idx, &body, &blen, &de) == 0) {
-                serial_puts("[socrates/arm64] m6: article \"");
+                serial_puts("[vextro/arm64] m6: article \"");
                 serial_puts(de.title[0] ? de.title : de.url);
                 serial_puts("\" -> ");
                 serial_put_u64(blen);
                 serial_puts(" bytes\n");
             } else {
-                serial_puts("[socrates/arm64] m6: article read failed - ");
+                serial_puts("[vextro/arm64] m6: article read failed - ");
                 serial_puts(zim_err);
                 serial_puts("\n");
             }
         } else {
-            serial_puts("[socrates/arm64] m6: zim open failed - ");
+            serial_puts("[vextro/arm64] m6: zim open failed - ");
             serial_puts(zim_err);
             serial_puts("\n");
         }
 
         /* The model. Loading is incremental so the UI can show progress;
          * here it just runs to completion and reports how long it took. */
-        serial_puts("[socrates/arm64] m6: loading qwen2.gguf\n");
+        serial_puts("[vextro/arm64] m6: loading qwen2.gguf\n");
         const char *lerr = "?";
         uint64_t t0 = timer_ms();
 
@@ -1184,13 +1184,13 @@ void kmain(void) {
         static fs_file_t gguf;
         int staged = 0;
         if (fs_open("/qwen2.gguf", &gguf) != 0) {
-            serial_puts("[socrates/arm64] m6: cannot open /qwen2.gguf\n");
+            serial_puts("[vextro/arm64] m6: cannot open /qwen2.gguf\n");
         } else if (llm_load(llm_read_thunk, &gguf, gguf.size, &lerr) != 0) {
-            serial_puts("[socrates/arm64] m6: gguf metadata failed - ");
+            serial_puts("[vextro/arm64] m6: gguf metadata failed - ");
             serial_puts(lerr); serial_puts("\n");
         } else {
             const llm_info_t *mi = llm_get_info();
-            serial_puts("[socrates/arm64] m6: gguf ok, n_embd ");
+            serial_puts("[vextro/arm64] m6: gguf ok, n_embd ");
             serial_put_u64(mi->n_embd);
             serial_puts(", layers ");
             serial_put_u64(mi->n_layer);
@@ -1209,20 +1209,20 @@ void kmain(void) {
                 int pct = llm_load_progress();
                 if (pct / 25 != last_pct / 25) {
                     last_pct = pct;
-                    serial_puts("[socrates/arm64] m6: weights ");
+                    serial_puts("[vextro/arm64] m6: weights ");
                     serial_put_u64((uint64_t)pct);
                     serial_puts("%\n");
                 }
             }
             if (llm_weights_loaded()) {
-                serial_puts("[socrates/arm64] m6: weights resident in ");
+                serial_puts("[vextro/arm64] m6: weights resident in ");
                 serial_put_u64(timer_ms() - t0);
                 serial_puts(" ms\n");
 
                 /* One token, end to end: tokenise, evaluate, pick, detokenise. */
                 int32_t toks[16];
                 int nt = llm_encode("The capital of France is", toks, 16);
-                serial_puts("[socrates/arm64] m6: prompt is ");
+                serial_puts("[vextro/arm64] m6: prompt is ");
                 serial_put_u64((uint64_t)nt);
                 serial_puts(" tokens\n");
                 uint64_t t1 = timer_ms();
@@ -1233,18 +1233,18 @@ void kmain(void) {
                 int id = llm_argmax();
                 char piece[64];
                 llm_decode(id, piece, sizeof(piece));
-                serial_puts("[socrates/arm64] m6: next token = \"");
+                serial_puts("[vextro/arm64] m6: next token = \"");
                 serial_puts(piece);
                 serial_puts("\" in ");
                 serial_put_u64(timer_ms() - t1);
                 serial_puts(" ms\n");
             } else {
-                serial_puts("[socrates/arm64] m6: load failed - ");
+                serial_puts("[vextro/arm64] m6: load failed - ");
                 serial_puts(lerr ? lerr : "?");
                 serial_puts("\n");
             }
         } else {
-            serial_puts("[socrates/arm64] m6: load_begin failed - ");
+            serial_puts("[vextro/arm64] m6: load_begin failed - ");
             serial_puts(lerr ? lerr : "?");
             serial_puts("\n");
         }
@@ -1252,7 +1252,7 @@ void kmain(void) {
 #endif
 
     display_boot_animation(vram, w, h, pitch_px);
-    serial_puts("[socrates/arm64] boot animation done\n");
+    serial_puts("[vextro/arm64] boot animation done\n");
 
     vtinput_init((int32_t)w, (int32_t)h);
 
@@ -1326,19 +1326,19 @@ void kmain(void) {
         if (e1000_found && !net_fetch_started && frames == 360) {
             net_fetch_started = 1;
             http_get("example.com", 80, "/");
-            serial_puts("[socrates/arm64] http: GET http://example.com/\n");
+            serial_puts("[vextro/arm64] http: GET http://example.com/\n");
         }
         if (net_fetch_started && !net_fetch_reported &&
             (http_state == HTTP_DONE || http_state == HTTP_ERROR)) {
             net_fetch_reported = 1;
             if (http_state == HTTP_DONE) {
-                serial_puts("[socrates/arm64] http: status ");
+                serial_puts("[vextro/arm64] http: status ");
                 serial_put_u64((uint64_t)http_status_code);
                 serial_puts(", ");
                 serial_put_u64((uint64_t)http_body_len);
                 serial_puts(" bytes of body\n");
             } else {
-                serial_puts("[socrates/arm64] http: failed - ");
+                serial_puts("[vextro/arm64] http: failed - ");
                 serial_puts(http_err);
                 serial_puts("\n");
             }
@@ -1348,7 +1348,7 @@ void kmain(void) {
             /* Frame counts separate the three ways "no reply" happens:
              * nothing sent, nothing received, or received and discarded
              * upstream. Each needs a different next question. */
-            serial_puts("[socrates/arm64] net: tx ");
+            serial_puts("[vextro/arm64] net: tx ");
             serial_put_u64(vnet_tx_count);
             serial_puts(" frames, rx ");
             serial_put_u64(vnet_rx_count);
@@ -1360,7 +1360,7 @@ void kmain(void) {
         }
         if (e1000_found && ping_replies != net_selftest_seen) {
             net_selftest_seen = ping_replies;
-            serial_puts("[socrates/arm64] icmp reply from gateway (");
+            serial_puts("[vextro/arm64] icmp reply from gateway (");
             serial_put_u64((uint64_t)net_selftest_seen);
             serial_puts(" of ");
             serial_put_u64((uint64_t)net_selftest_sent);
@@ -1374,7 +1374,7 @@ void kmain(void) {
         if (mouse_x != last_mx || mouse_y != last_my ||
             mouse_buttons != last_mb) {
             last_mx = mouse_x; last_my = mouse_y; last_mb = mouse_buttons;
-            serial_puts("[socrates/arm64] pointer ");
+            serial_puts("[vextro/arm64] pointer ");
             serial_put_u64((uint64_t)(uint32_t)last_mx);
             serial_puts(",");
             serial_put_u64((uint64_t)(uint32_t)last_my);
@@ -1401,7 +1401,7 @@ void kmain(void) {
          */
         if (want_logout) {
             want_logout = 0;
-            serial_puts("[socrates/arm64] logout: ");
+            serial_puts("[vextro/arm64] logout: ");
             serial_puts(user_name_of(user_current));
             serial_puts("\n");
             session_end();
@@ -1492,7 +1492,7 @@ void kmain(void) {
                 auto_browser_done = 1;
                 wm_open(WK_BROWSER);
                 brw_navigate("http://example.com/");
-                serial_puts("[socrates/arm64] desktop: browser opened on example.com\n");
+                serial_puts("[vextro/arm64] desktop: browser opened on example.com\n");
             }
 #endif
 #ifdef AUTO_ASK
@@ -1526,7 +1526,7 @@ void kmain(void) {
 
             frames++;
             if (frames % 120 == 0 && present_n) {
-                serial_puts("[socrates/arm64] scanout: ");
+                serial_puts("[vextro/arm64] scanout: ");
                 serial_put_u64(present_px / present_n);
                 serial_puts(" px/frame of ");
                 serial_put_u64((uint64_t)w * h);
@@ -1537,7 +1537,7 @@ void kmain(void) {
                 uint64_t now = timer_ms();
                 uint64_t ms  = now - last_report_ms;
                 last_report_ms = now;
-                serial_puts("[socrates/arm64] desktop: 120 frames in ");
+                serial_puts("[vextro/arm64] desktop: 120 frames in ");
                 serial_put_u64(ms);
                 serial_puts(" ms (");
                 serial_put_u64(ms ? (120 * 1000) / ms : 0);
@@ -1636,7 +1636,7 @@ void kmain(void) {
                         str_copy(login_notice,
                                  "Administrator account 'admin' created, "
                                  "same password", sizeof(login_notice));
-                        serial_puts("[socrates/arm64] users: created 'admin' "
+                        serial_puts("[vextro/arm64] users: created 'admin' "
                                     "alongside a standard account\n");
                     }
                     login_sel = user_find(pending_name);
@@ -1690,14 +1690,14 @@ void kmain(void) {
                         serial_puts("[cu] done\n");
                     }
 #endif
-                serial_puts("[socrates/arm64] login: ");
+                serial_puts("[vextro/arm64] login: ");
                     serial_puts(user_name_of(user_current));
                     serial_puts(user_is_admin(user_current) ? " (admin)\n"
                                                             : "\n");
                 } else {
                     melt_active = 1;
                     melt_tick = 0;
-                    serial_puts("[socrates/arm64] login: refused\n");
+                    serial_puts("[vextro/arm64] login: refused\n");
                 }
                 break;
             }
@@ -1711,7 +1711,7 @@ void kmain(void) {
             const char *prompt;
             switch (login_stage) {
             case LOGIN_NEW_NAME:
-                prompt = "Socrates BSD 9 ARM64 - Create an account. Username:";
+                prompt = "Vextro 9 ARM64 - Create an account. Username:";
                 break;
             case LOGIN_NEW_PW:     prompt = "Choose a password:"; break;
             case LOGIN_NEW_CONFIRM: prompt = "Type it once more:"; break;
@@ -1757,7 +1757,7 @@ void kmain(void) {
             uint64_t now = timer_ms();
             uint64_t ms  = now - last_report_ms;
             last_report_ms = now;
-            serial_puts("[socrates/arm64] 120 frames in ");
+            serial_puts("[vextro/arm64] 120 frames in ");
             serial_put_u64(ms);
             serial_puts(" ms (");
             serial_put_u64(ms ? (120 * 1000) / ms : 0);

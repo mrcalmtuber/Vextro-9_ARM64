@@ -1,6 +1,6 @@
 # ARM64 port status
 
-Socrates BSD 9 on `qemu-system-aarch64 -M virt`. The x86_64 tree is
+Vextro 9 on `qemu-system-aarch64 -M virt`. The x86_64 tree is
 untouched and unaffected.
 
 ## Where it is
@@ -40,7 +40,7 @@ python3 tools/arm_shot.py 300        # capture a frame to build/screen.ppm
 python3 tools/arm_input_test.py 330  # drive real input through QMP
 ```
 
-`make run` picks up `../Socrates BSD 9/disk.img` automatically if present,
+`make run` picks up `../Vextro 9/disk.img` automatically if present,
 **read-only** — that volume holds `wiki.zim` and the model, and nothing in
 this port needs to write to it yet. `DISK=` and `DISK_RO=off` override.
 

@@ -192,11 +192,11 @@ static int bsd_exec(const uint8_t *file, uint64_t len) {
      */
     int nimp = bsd_resolve_imports(base, span);
     if (nimp < 0) {
-        serial_puts("[socrates/arm64] .bsd: malformed import table\n");
+        serial_puts("[vextro/arm64] .bsd: malformed import table\n");
         return -1;
     }
     if (nimp > 0) {
-        serial_puts("[socrates/arm64] .bsd: resolved ");
+        serial_puts("[vextro/arm64] .bsd: resolved ");
         serial_put_u64((uint64_t)nimp);
         serial_puts(" imported symbols\n");
     }

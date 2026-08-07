@@ -1,4 +1,4 @@
-# Socrates BSD 9 — ARM64
+# Vextro 9 — ARM64
 #
 # The x86_64 build is preserved as Makefile.x86.ref. This one grows a
 # milestone at a time rather than being ported wholesale, so that every
@@ -177,7 +177,7 @@ build/kernel.o: src/kernel.c $(wildcard src/*.h) build/res.stamp
 
 # --- The demo application, built for aarch64 and embedded ---
 #
-# apps/app.ld now says elf64-littleaarch64 and apps/socrates.h issues
+# apps/app.ld now says elf64-littleaarch64 and apps/vextro.h issues
 # `svc #0` instead of `int $0x80`, but hello.c itself is unchanged: the
 # syscall numbers and their argument meanings are the same on both
 # architectures, so only the header that reaches them differs.
@@ -185,7 +185,7 @@ build/bsd_maker: bsdfmt/bsd_maker.c
 	@mkdir -p build
 	cc -O2 -o $@ $<
 
-build/hello.bsd: apps/hello.c apps/socrates.h apps/app.ld build/bsd_maker
+build/hello.bsd: apps/hello.c apps/vextro.h apps/app.ld build/bsd_maker
 	@mkdir -p build
 	$(CC) $(CFLAGS) -Iapps -nostdlib -c apps/hello.c -o build/hello.o
 	$(LD) -nostdlib -no-pie -T apps/app.ld build/hello.o -o build/hello.elf
@@ -249,7 +249,7 @@ iso: os.iso
 os.iso: $(ISO)/boot/kernel $(ISO)/boot/limine/limine.conf
 	xorriso -as mkisofs \
 		-R -J \
-		-V "SOCRATES_ARM64" \
+		-V "VEXTRO_ARM64" \
 		--efi-boot boot/limine/limine-uefi-cd.bin \
 		-efi-boot-part --efi-boot-image \
 		--protective-msdos-label \
@@ -348,12 +348,12 @@ assets:
 		$(if $(filter 1,$(ASSETS)),--yes,)
 	@rm -f $(ASSET_LIST)
 
-DISK    ?= ../Socrates BSD 9/disk.img
+DISK    ?= ../Vextro 9/disk.img
 DISK_RO ?= off
 
 # $(wildcard) cannot be used here, and the reason is a trap worth naming:
 # it splits its argument on whitespace and the default path has spaces in
-# it, so `$(wildcard ../Socrates BSD 9/disk.img)` looks for three separate
+# it, so `$(wildcard ../Vextro 9/disk.img)` looks for three separate
 # files, matches none, and quietly decides there is no disk. `make run`
 # therefore booted with no volume at all — no exFAT, no saved keycode, no
 # encyclopedia, no model — while the headless harness, which is Python and

@@ -330,12 +330,12 @@ static void timer_takeover(void) {
 static void mmu_report(void) {
     uint64_t sp;
     __asm__ volatile("mov %0, sp" : "=r"(sp));
-    serial_puts("[socrates/arm64] SP     "); serial_put_hex64(sp);
-    serial_puts("\n[socrates/arm64] TTBR0  "); serial_put_hex64(SYSREG_READ(ttbr0_el1));
-    serial_puts("\n[socrates/arm64] TTBR1  "); serial_put_hex64(SYSREG_READ(ttbr1_el1));
-    serial_puts("\n[socrates/arm64] TCR    "); serial_put_hex64(SYSREG_READ(tcr_el1));
-    serial_puts("\n[socrates/arm64] SCTLR  "); serial_put_hex64(SYSREG_READ(sctlr_el1));
-    serial_puts("\n[socrates/arm64] MAIR   "); serial_put_hex64(SYSREG_READ(mair_el1));
+    serial_puts("[vextro/arm64] SP     "); serial_put_hex64(sp);
+    serial_puts("\n[vextro/arm64] TTBR0  "); serial_put_hex64(SYSREG_READ(ttbr0_el1));
+    serial_puts("\n[vextro/arm64] TTBR1  "); serial_put_hex64(SYSREG_READ(ttbr1_el1));
+    serial_puts("\n[vextro/arm64] TCR    "); serial_put_hex64(SYSREG_READ(tcr_el1));
+    serial_puts("\n[vextro/arm64] SCTLR  "); serial_put_hex64(SYSREG_READ(sctlr_el1));
+    serial_puts("\n[vextro/arm64] MAIR   "); serial_put_hex64(SYSREG_READ(mair_el1));
     serial_puts("\n");
 }
 
@@ -752,7 +752,7 @@ static void mmio_map_init(void) {
  * at when a machine is mysteriously short of RAM.
  */
 static void mmio_report(void) {
-    serial_puts("[socrates/arm64] map: ");
+    serial_puts("[vextro/arm64] map: ");
     serial_put_u64((uint64_t)mmio_region_count);
     serial_puts(" device regions, ");
     serial_put_u64((uint64_t)dev_l2_n);
@@ -938,7 +938,7 @@ static void fdt_discover(const void *blob) {
 
 /* Reporting, once there is a console to report to. */
 static void fdt_report(const void *blob) {
-    serial_puts("[socrates/arm64] fdt: blob ");
+    serial_puts("[vextro/arm64] fdt: blob ");
     serial_put_hex64((uint64_t)(uintptr_t)blob);
     if (blob) {
         serial_puts(" magic ");
@@ -946,31 +946,31 @@ static void fdt_report(const void *blob) {
     }
     serial_puts("\n");
     if (!fdt_ok) {
-        serial_puts("[socrates/arm64] fdt: none (keeping virt defaults)\n");
+        serial_puts("[vextro/arm64] fdt: none (keeping virt defaults)\n");
         return;
     }
 
-    serial_puts("[socrates/arm64] board: ");
+    serial_puts("[vextro/arm64] board: ");
     serial_puts(board_name());
     serial_puts("\n");
 
     if (board_kind != BOARD_VIRT) {
-        serial_puts("[socrates/arm64] bcm: periph ");
+        serial_puts("[vextro/arm64] bcm: periph ");
         serial_put_hex64(bcm_periph_base);
         serial_puts(" mbox "); serial_put_hex64(bcm_mbox_base);
-        serial_puts("\n[socrates/arm64] bcm: emmc ");
+        serial_puts("\n[vextro/arm64] bcm: emmc ");
         serial_put_hex64(bcm_emmc_base);
         serial_puts(" genet "); serial_put_hex64(bcm_genet_base);
         serial_puts("\n");
     }
 
-    serial_puts("[socrates/arm64] fdt: uart ");
+    serial_puts("[vextro/arm64] fdt: uart ");
     serial_put_hex64(pl011_base);
     serial_puts(" rtc "); serial_put_hex64(pl031_base);
-    serial_puts("\n[socrates/arm64] fdt: gicd ");
+    serial_puts("\n[vextro/arm64] fdt: gicd ");
     serial_put_hex64(gicd_base);
     serial_puts(" gicc "); serial_put_hex64(gicc_base);
-    serial_puts("\n[socrates/arm64] fdt: virtio ");
+    serial_puts("\n[vextro/arm64] fdt: virtio ");
     serial_put_hex64(virtio_base);
     serial_puts("\n");
 }
@@ -1010,7 +1010,7 @@ void arm_fault(uint64_t kind, uint64_t esr, uint64_t elr, uint64_t far) {
     static const char *names[4] = {
         "synchronous", "IRQ", "FIQ", "SError"
     };
-    serial_puts("\n[socrates/arm64] unhandled ");
+    serial_puts("\n[vextro/arm64] unhandled ");
     serial_puts(names[kind & 3]);
     serial_puts(" exception\n  ESR_EL1 ");
     serial_put_hex64(esr);

@@ -726,9 +726,9 @@ void kmain(void) {
         /* Choose prompt based on boot state */
         const char *prompt;
         if (is_first_boot)
-            prompt = "Socrates BSD 9 - Initialize System. Choose Master Keycode:";
+            prompt = "Vextro 9 - Initialize System. Choose Master Keycode:";
         else
-            prompt = "Socrates BSD 9 - Enter Keycode:";
+            prompt = "Vextro 9 - Enter Keycode:";
 
         /* Mouse-reactive demoscene vortex + login interface */
         login_render(backbuf, w, h, mouse_x, mouse_y,

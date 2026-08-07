@@ -217,7 +217,7 @@ static void vtinput_init(int32_t screen_w, int32_t screen_h) {
         if (vio_rd(b, VIO_MAGIC) != VIO_MAGIC_VALUE) continue;
         uint32_t dev = vio_rd(b, VIO_DEVICE_ID);
         if (dev == 0) continue;                 /* empty slot */
-        serial_puts("[socrates/arm64]   virtio slot ");
+        serial_puts("[vextro/arm64]   virtio slot ");
         serial_put_u64(i);
         serial_puts(": device ");
         serial_put_u64(dev);
@@ -242,7 +242,7 @@ static void vtinput_init(int32_t screen_w, int32_t screen_h) {
         if (vti_start(&vti_tablet, tab_idx)) mouse_absolute = 1;
     }
 
-    serial_puts("[socrates/arm64] virtio-input: keyboard ");
+    serial_puts("[vextro/arm64] virtio-input: keyboard ");
     serial_puts(vti_kbd.live ? "yes" : "no");
     serial_puts(", tablet ");
     serial_puts(vti_tablet.live ? "yes" : "no");

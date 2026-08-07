@@ -28,7 +28,7 @@ FIRMWARE = "/opt/homebrew/share/qemu/edk2-aarch64-code.fd"
 # The volume with wiki.zim and the model. Writable now: accounts and
 # home directories live on whichever volume the system mounts, and
 # fs_mount() takes the largest, which is this one.
-DISK = os.path.join(ROOT, "..", "Socrates BSD 9", "disk.img")
+DISK = os.path.join(ROOT, "..", "Vextro 9", "disk.img")
 
 # EDK2 keeps its variables in a second flash bank and wants one even when
 # empty. It is regenerated whenever it is missing or older than the ISO:
@@ -153,7 +153,7 @@ time.sleep(3)
 qmp("screendump", {"filename": f"{ROOT}/build/input-a.ppm"})
 
 print("typing", flush=True)
-type_text("socrates")
+type_text("vextro")
 time.sleep(3)
 
 print("moving pointer to (0.75, 0.70) and clicking", flush=True)

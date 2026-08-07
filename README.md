@@ -1,4 +1,4 @@
-<h1 align="center">Socrates BSD 9 — ARM64</h1>
+<h1 align="center">Vextro 9 — ARM64</h1>
 
 <p align="center">
   <b>The same operating system, on a different architecture.</b><br>
@@ -11,7 +11,7 @@
   <img alt="virtio" src="https://img.shields.io/badge/devices-virtio-1f2430?style=flat-square">
   <img alt="pi" src="https://img.shields.io/badge/board-Raspberry%20Pi%204-1f2430?style=flat-square">
   <a href="../../releases"><img alt="releases" src="https://img.shields.io/badge/download-ISO-d4af37?style=flat-square"></a>
-  <a href="https://github.com/mrcalmtuber/socrates-bsd-9"><img alt="x86_64 original" src="https://img.shields.io/badge/also%20on-x86__64-d4af37?style=flat-square"></a>
+  <a href="https://github.com/mrcalmtuber/vextro"><img alt="x86_64 original" src="https://img.shields.io/badge/also%20on-x86__64-d4af37?style=flat-square"></a>
 </p>
 
 <p align="center">
@@ -21,7 +21,7 @@
 > **What this OS actually *does*** — the windowed desktop, a browser on its
 > own TCP/IP stack, offline Wikipedia, a transformer language model, an app
 > store — is documented in the
-> **[x86_64 repository](https://github.com/mrcalmtuber/socrates-bsd-9)**.
+> **[x86_64 repository](https://github.com/mrcalmtuber/vextro)**.
 > All of it is here too, and all of it works. This page is about the
 > machine layer underneath, because that is the only part that differs.
 
@@ -407,7 +407,7 @@ python3 tools/arm_shot.py 300        # capture a frame
 python3 tools/arm_input_test.py 330  # drive real input through QMP
 ```
 
-`make run` picks up `../Socrates BSD 9/disk.img` if present — the same 8 GB
+`make run` picks up `../Vextro 9/disk.img` if present — the same 8 GB
 exFAT volume the x86_64 build uses, byte for byte, carrying `wiki.zim` and
 the model. `DISK=` and `DISK_RO=off` override.
 
@@ -488,7 +488,7 @@ tools/
 
 Everything else — `desktop.h`, `browser.h`, `zim.h`, `zstd.h`, `llm.c`,
 `exfat.h`, `ttf.h` — is the portable two thirds, and is described in the
-[x86_64 repository](https://github.com/mrcalmtuber/socrates-bsd-9).
+[x86_64 repository](https://github.com/mrcalmtuber/vextro).
 
 **[PORT_STATUS.md](PORT_STATUS.md)** is the blow-by-blow: every milestone,
 what each one cost, and what the original plan got wrong.

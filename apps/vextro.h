@@ -1,13 +1,13 @@
-#ifndef SOCRATES_H
-#define SOCRATES_H
+#ifndef VEXTRO_H
+#define VEXTRO_H
 
 /*
- * Socrates BSD 9 — Native Hybrid Application Header (aarch64)
+ * Vextro 9 — Native Hybrid Application Header (aarch64)
  *
  * Inline assembly wrappers around the kernel's syscall gateway. Include
  * this in any standalone app to reach OS services without linking
  * against kernel internals. The x86_64 original is kept alongside as
- * socrates_x86.h.ref.
+ * vextro_x86.h.ref.
  *
  * Syscall ABI:
  *   X8 = syscall number
@@ -79,4 +79,4 @@ static inline void os_exit(void) {
     for (;;) { }                    /* not reached */
 }
 
-#endif /* SOCRATES_H */
+#endif /* VEXTRO_H */
