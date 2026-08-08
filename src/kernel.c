@@ -1006,12 +1006,12 @@ void kmain(void) {
      * and to draw. Nothing about hello.c changed to get here; only the
      * header it includes and the linker script it uses.
      */
-    extern const uint8_t hello_bsd[], hello_vx_end[];
-    uint64_t hello_len = (uint64_t)(hello_vx_end - hello_bsd);
+    extern const uint8_t hello_vx[], hello_vx_end[];
+    uint64_t hello_len = (uint64_t)(hello_vx_end - hello_vx);
     serial_puts("[vextro/arm64] .vx: running embedded app, ");
     serial_put_u64(hello_len);
     serial_puts(" bytes\n");
-    if (vx_exec(hello_bsd, hello_len) != 0) {
+    if (vx_exec(hello_vx, hello_len) != 0) {
         serial_puts("[vextro/arm64] .vx: refused - ");
         serial_puts(app_err);
         serial_puts("\n");

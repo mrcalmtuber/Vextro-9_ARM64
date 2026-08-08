@@ -11,12 +11,12 @@
  */
 .section .rodata
 .balign 16
-.global hello_bsd
-hello_bsd:
+.global hello_vx
+hello_vx:
     .incbin "build/hello.vx"
 .global hello_vx_end
 hello_vx_end:
 .global hello_vx_len
 .balign 8
 hello_vx_len:
-    .quad hello_vx_end - hello_bsd
+    .quad hello_vx_end - hello_vx
