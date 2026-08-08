@@ -534,19 +534,31 @@ brackets that call instead.
 
 ## What is not here
 
-No 3D graphics *API* — but there is a software rasteriser (`src/v3d.h`
-and the **Solid** app), integer 16.16 with a z-buffer and flat shading
-from real face normals; what is missing is an API over a GPU. No
-compressed-media codecs. **No audio device on this port at all**, so the
-Media Player lists and parses tracks and then says why it is silent, and
-`beep` is compiled out rather than shipped as a command that can never
-work. No hypervisor — but `src/chip8.h` is a complete CHIP-8
-interpreter, all thirty-five opcodes, which is a real emulator for a real
-legacy machine. No hypervisor, so no
-virtualised legacy environment. No TLS, so `https://` is refused rather
-than faked. No device management, no biometrics, no multi-touch, no TV
-tuner, no media streaming — this configuration exposes none of the
-hardware they would need.
+There is a 3D graphics API — `src/g3d.h`, with pipelines, buffers,
+matrices, a command buffer and the G3SL shader compiler, driving the
+**Solid** app. What no hardware here can do is run it: this board has no
+3D engine, so the geometry and fragment stages are CPU work and the
+window says which backend is live. Compressed audio decodes — FLAC, IMA
+ADPCM and G.711 — but **there is no audio device on this port at all**,
+so the Media Player lists tracks, decodes them, and then says why it is
+silent; `beep` is compiled out rather than shipped as a command that can
+never work. Compressed *video* is absent on both ports.
+
+**No hypervisor on this port.** The x86 tree runs a guest on AMD-V; the
+ARM equivalent needs EL2, and what that takes here was measured rather
+than guessed: `-M virt` has no EL2 at all, `virtualization=on` gives the
+board one but Apple's HVF refuses to provide it to the guest CPU, under
+TCG Limine panics on an ARMv8.0 core for want of VHE, and with `-cpu max`
+the kernel boots and `kmain` reports EL2. So the prerequisite is
+reachable, in emulation, on a VHE-capable core — and the hypervisor
+itself is not written. `src/hyper.h` here reports exactly that. What does
+exist is a real emulator: `src/chip8.h` interprets all thirty-five
+opcodes of a 4 KB machine.
+
+No TLS, so `https://` is refused rather than faked. No device
+management, no biometrics, no multi-touch, no TV tuner, no media
+streaming — this configuration exposes none of the hardware they would
+need.
 
 Directories can be sealed into encrypted containers, and this account's
 home directory can be backed up encrypted, but the volume itself is not
