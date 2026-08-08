@@ -65,7 +65,11 @@ static uint64_t system_total_memory_mb = 0;
 #define DOCK_EDGE_RIGHT  2
 
 /* Built-in launchers, plus one slot per app installed from the store. */
-#define DOCK_BASE_COUNT 15
+#define DOCK_BASE_COUNT 16
+
+/* The Show Desktop tab occupies the far end of the bar, past the last
+ * launcher. It is the only thing that triggers Peek. */
+#define DOCK_SHOWDESK_W 18
 #define DOCK_MAX_ITEMS  25
 
 static int dock_item_count = DOCK_BASE_COUNT;
@@ -86,10 +90,29 @@ static dock_config_t dock_cfg = {
     .edge = DOCK_EDGE_BOTTOM,
 };
 
+/*
+ * The icon size actually used, which is what Settings asked for shrunk
+ * until the row fits the screen.
+ *
+ * Sixteen launchers at 40 px need 928 px of bar. The x86 default mode is
+ * 1280 wide and never noticed; the ARM port's is 800, where the row ran
+ * off both ends and the launchers at each end could not be clicked at
+ * all. Fitting is computed rather than assumed, so it stays correct at
+ * any mode and any number of installed apps.
+ */
+static int32_t dock_eff_isz = 40;
+
 static void dock_recalc(uint32_t scr_w, uint32_t scr_h) {
-    (void)scr_w;
-    dock_cfg.bar_h = dock_cfg.icon_sz + 12;
-    dock_cfg.bar_w = dock_item_count * (dock_cfg.icon_sz + 16) + 14;
+    const int32_t along = (dock_cfg.edge == DOCK_EDGE_BOTTOM)
+                          ? (int32_t)scr_w : (int32_t)scr_h;
+    int32_t isz = dock_cfg.icon_sz;
+    while (isz > 18 &&
+           dock_item_count * (isz + 16) + 14 + DOCK_SHOWDESK_W > along - 16)
+        isz -= 2;
+
+    dock_eff_isz = isz;
+    dock_cfg.bar_h = isz + 12;
+    dock_cfg.bar_w = dock_item_count * (isz + 16) + 14 + DOCK_SHOWDESK_W;
     if (dock_cfg.edge == DOCK_EDGE_BOTTOM)
         dock_cfg.bar_y = (int32_t)scr_h - dock_cfg.bar_h - 4;
     else
@@ -114,6 +137,7 @@ enum {
     WK_MEDIA,
     WK_SOLID,
     WK_CHIP8,
+    WK_CHAMBER,
     WK_ABOUT,
     WK_COUNT
 };
@@ -155,7 +179,7 @@ static const wk_meta_t wk_meta[WK_COUNT] = {
     { "Monolith",          UI_SNAP(400), UI_SNAP(480) },
     { "Matrix",            UI_SNAP(620), UI_SNAP(420) },
     { "hello",             UI_SNAP(600), UI_SNAP(430) },
-    { "Agora App Store",   UI_SNAP(720), UI_SNAP(520) },
+    { "Ingot",             UI_SNAP(720), UI_SNAP(560) },
     { "Photos",            UI_SNAP(760), UI_SNAP(560) },
     /* Wide enough to read prose in: articles are laid out in this window
      * now rather than handed to the browser, and 520 was a search box. */
@@ -166,6 +190,7 @@ static const wk_meta_t wk_meta[WK_COUNT] = {
     { "Media Player",      UI_SNAP(560), UI_SNAP(420) },
     { "Solid",             UI_SNAP(520), UI_SNAP(440) },
     { "CHIP-8",            UI_SNAP(560), UI_SNAP(400) },
+    { "Chamber",           UI_SNAP(600), UI_SNAP(540) },
     { "About Vextro",      UI_SNAP(380), UI_SNAP(270) },
 };
 
@@ -974,8 +999,9 @@ static int execute_bin(const char *filepath) {
 #include "calc.h"
 /* After calc.h; needs ac97_play from the driver kernel.c pulls in. */
 #include "media.h"
-#include "v3d.h"
+#include "solid.h"
 #include "chip8.h"
+#include "chamber.h"
 
 /* Canvas app (WK_HELLO) content drawer */
 static void hello_draw(uint32_t *buf, uint32_t w, uint32_t h,
@@ -1365,11 +1391,14 @@ static void wm_draw_content(uint32_t *buf, uint32_t w, uint32_t h, int kind) {
         media_draw(buf, w, h, cx, cy, cw, chh, mouse_x, mouse_y);
         break;
     case WK_SOLID:
-        v3d_app_draw(buf, w, h, cx, cy, cw, chh, mouse_x, mouse_y);
+        solid_draw(buf, w, h, cx, cy, cw, chh, mouse_x, mouse_y);
         break;
     case WK_CHIP8:
         c8_app_draw(buf, w, h, cx, cy, cw, chh, mouse_x, mouse_y);
         c8_keys_decay();
+        break;
+    case WK_CHAMBER:
+        chamber_draw(buf, w, h, cx, cy, cw, chh, mouse_x, mouse_y);
         break;
     case WK_SETTINGS:
         settings_draw(buf, w, h, cx, cy, cw, chh, desktop_tick, focused);
@@ -1386,7 +1415,13 @@ static void wm_draw_content(uint32_t *buf, uint32_t w, uint32_t h, int kind) {
  *
  * Snap, Shake and Peek are three readings of the same drag. None of them
  * needs a gesture recogniser: an edge is a comparison, a shake is a count
- * of direction changes, and a peek is a hover with a ramp on it.
+ * of direction changes, and a peek is a ramp on a latch.
+ *
+ * Peek used to be a hover: crossing the dock on the way to anything at
+ * the bottom of the screen dissolved every window, which is a large
+ * effect to trigger by accident and no way to decline. It is a click on
+ * the Show Desktop tab now, and it latches -- clicking the tab again, or
+ * touching any window, puts the stack back. Nothing fades on hover.
  */
 
 #define PEEK_RAMP     8      /* frames to fade the windows out and back */
@@ -1396,7 +1431,8 @@ static void wm_draw_content(uint32_t *buf, uint32_t w, uint32_t h, int kind) {
 #define SHAKE_WINDOW 28      /* ...within this many frames */
 #define SHAKE_MIN_DX  9      /* travel that counts as a stroke, not a wobble */
 
-static int32_t aero_peek = 0;          /* 0..PEEK_RAMP */
+static int32_t aero_peek = 0;          /* 0..PEEK_RAMP, the ramp */
+static int     aero_peek_hold = 0;     /* the latch the ramp chases */
 static int     aero_snap_hint = SNAP_NONE;
 
 static int32_t shake_last_x = 0;
@@ -1448,6 +1484,10 @@ static void wm_update(int32_t mx, int32_t my, uint8_t lmb, uint8_t prev_lmb,
     if (click) {
         int hit = wm_top_at(mx, my);
         if (hit >= 0) {
+            /* Reaching for a window is the other way out of Peek: the
+             * stack is faded, not gone, so a click on one means the
+             * user is done looking at the desktop. */
+            aero_peek_hold = 0;
             wm_raise(hit);
             if (wm_hit_btn(hit, WM_BTN_CLOSE, mx, my)) {
                 wm_close(hit);
@@ -1554,10 +1594,13 @@ static void wm_update(int32_t mx, int32_t my, uint8_t lmb, uint8_t prev_lmb,
             media_mouse(mx, my, eff_lmb, prev_lmb, cx, cy, cw, chh);
             break;
         case WK_SOLID:
-            v3d_app_mouse(mx, my, eff_lmb, prev_lmb, cx, cy, cw, chh);
+            solid_mouse(mx, my, eff_lmb, prev_lmb, cx, cy, cw, chh);
             break;
         case WK_CHIP8:
             c8_app_mouse(mx, my, eff_lmb, prev_lmb, cx, cy, cw, chh);
+            break;
+        case WK_CHAMBER:
+            chamber_mouse(mx, my, eff_lmb, prev_lmb);
             break;
         case WK_PAINT:
             paint_mouse(mx, my, eff_lmb, prev_lmb, cx, cy, cw, chh,
@@ -2312,7 +2355,8 @@ typedef struct {
 
 static const int dock_base_kinds[DOCK_BASE_COUNT] = {
     WK_TERM, WK_BROWSER, WK_FILES, WK_STORE, WK_IMAGE, WK_WIKI, WK_PAINT,
-    WK_SYSMON, WK_MATRIX, WK_HELLO, WK_CALC, WK_MEDIA, WK_SOLID, WK_CHIP8, WK_SETTINGS,
+    WK_SYSMON, WK_MATRIX, WK_HELLO, WK_CALC, WK_MEDIA, WK_SOLID, WK_CHIP8,
+    WK_CHAMBER, WK_SETTINGS,
 };
 
 static dock_item_t dock_items[DOCK_MAX_ITEMS];
@@ -2364,7 +2408,7 @@ static void dock_icon_rect(uint32_t scr_w, int idx,
                            int32_t *ow, int32_t *oh) {
     int32_t rx, ry, rw, rh;
     dock_bar_rect(scr_w, &rx, &ry, &rw, &rh);
-    int32_t isz = dock_cfg.icon_sz;
+    int32_t isz = dock_eff_isz;
     int32_t cell = isz + 16;
 
     if (dock_cfg.edge == DOCK_EDGE_BOTTOM) {
@@ -2378,6 +2422,34 @@ static void dock_icon_rect(uint32_t scr_w, int idx,
     *oh = isz;
 }
 
+/*
+ * The Show Desktop tab: the far end of the bar, past every launcher.
+ * dock_recalc has already reserved the length for it, so this is a slice
+ * of the bar rather than something hanging off the end of it.
+ */
+static void dock_showdesk_rect(uint32_t scr_w, int32_t *ox, int32_t *oy,
+                               int32_t *ow, int32_t *oh) {
+    int32_t rx, ry, rw, rh;
+    dock_bar_rect(scr_w, &rx, &ry, &rw, &rh);
+    if (dock_cfg.edge == DOCK_EDGE_BOTTOM) {
+        *ox = rx + rw - DOCK_SHOWDESK_W - 3;
+        *oy = ry + 4;
+        *ow = DOCK_SHOWDESK_W - 3;
+        *oh = rh - 8;
+    } else {
+        *ox = rx + 4;
+        *oy = ry + rh - DOCK_SHOWDESK_W - 3;
+        *ow = rw - 8;
+        *oh = DOCK_SHOWDESK_W - 3;
+    }
+}
+
+static int dock_hit_showdesk(int32_t mx, int32_t my) {
+    int32_t x, y, w, h;
+    dock_showdesk_rect(scr_w_cache, &x, &y, &w, &h);
+    return mx >= x && mx < x + w && my >= y && my < y + h;
+}
+
 /* pictogram icons — everything scales off sz */
 static void dock_draw_glyph(uint32_t *buf, uint32_t w, uint32_t h,
                             int kind, int32_t x, int32_t y, int32_t sz) {
@@ -2386,6 +2458,15 @@ static void dock_draw_glyph(uint32_t *buf, uint32_t w, uint32_t h,
     int32_t q = sz / 4;
 
     switch (kind) {
+    case WK_CHAMBER: {
+        /* a box inside a box: the guest, and what contains it */
+        gfx_rect_outline(buf, w, h, cx - q - 2, cy - q - 2, 2 * q + 4,
+                         2 * q + 4, C_GOLD_DIM);
+        gfx_rect(buf, w, h, cx - q / 2, cy - q / 2, q, q, C_GOLD);
+        gfx_rect(buf, w, h, cx - q - 2, cy - 1, 3, 2, C_GOLD_DIM);
+        gfx_rect(buf, w, h, cx + q, cy - 1, 3, 2, C_GOLD_DIM);
+        break;
+    }
     case WK_CHIP8: {
         /* a 4x4 keypad, which is what the machine had */
         for (int r = 0; r < 4; r++)
@@ -2608,6 +2689,13 @@ static int dock_mouse(int32_t mx, int32_t my, uint8_t lmb, uint8_t prev_lmb) {
     if (!click) return 0;
     if (!dock_hit_bar(mx, my)) return 0;
 
+    /* Show Desktop is a latch, so the second click is what puts the
+     * stack back -- there is no hover to walk away from. */
+    if (dock_hit_showdesk(mx, my)) {
+        aero_peek_hold = !aero_peek_hold;
+        return 1;
+    }
+
     const int i = dock_hit_item(mx, my);
     if (i >= 0) {
         /*
@@ -2829,6 +2917,29 @@ static void dock_draw(uint32_t *buf, uint32_t w, uint32_t h,
     }
 
     /*
+     * Show Desktop. Lit while the latch is set, so the state of Peek is
+     * visible from the thing that controls it -- with no hover trigger,
+     * a user who cannot see the latch has no way to know why the stack
+     * went transparent.
+     */
+    {
+        int32_t sx, sy, sw, sh;
+        dock_showdesk_rect(w, &sx, &sy, &sw, &sh);
+        const int shot = (mx >= sx && mx < sx + sw && my >= sy && my < sy + sh);
+        gfx_rect(buf, w, h, sx, sy, sw, sh,
+                 aero_peek_hold ? 0x30301Cu : (shot ? 0x262C3Eu : 0x1C2130u));
+        gfx_rect_outline(buf, w, h, sx, sy, sw, sh,
+                         aero_peek_hold ? C_GOLD : 0x2A3040u);
+        /* a screen, drawn small: the thing the click reveals */
+        const int32_t gw = (sw > sh ? sh : sw) - 6;
+        if (gw >= 5) {
+            gfx_rect_outline(buf, w, h, sx + (sw - gw) / 2,
+                             sy + (sh - gw) / 2, gw, gw,
+                             aero_peek_hold ? C_GOLD : C_TEXT_DIM);
+        }
+    }
+
+    /*
      * Hover shows a preview: the window as it actually looks if one is
      * running, and just the name if the slot is only a launcher. The
      * thumbnail is whatever the compositor last captured, which is why a
@@ -2926,7 +3037,7 @@ static int desktop_open_app_by_name(const char *name) {
     else if (str_eq(name, "sysmon") || str_eq(name, "monolith")) kind = WK_SYSMON;
     else if (str_eq(name, "matrix")) kind = WK_MATRIX;
     else if (str_eq(name, "about")) kind = WK_ABOUT;
-    else if (str_eq(name, "store") || str_eq(name, "agora") ||
+    else if (str_eq(name, "store") || str_eq(name, "ingot") ||
              str_eq(name, "apps")) kind = WK_STORE;
     else if (str_eq(name, "photos") || str_eq(name, "image") ||
              str_eq(name, "images")) kind = WK_IMAGE;
@@ -2987,7 +3098,8 @@ static void desktop_key_input(char ch) {
         return;
     }
     if (wm_focus == WK_MEDIA) { media_key(ch); return; }
-    if (wm_focus == WK_SOLID) { v3d_app_key(ch); return; }
+    if (wm_focus == WK_SOLID) { solid_key(ch); return; }
+    if (wm_focus == WK_CHAMBER) { chamber_key(ch); return; }
     if (wm_focus == WK_CHIP8) { c8_app_key(ch); return; }
     if (wm_focus == WK_CALC) {
         /* The keypad and the keyboard are the same machine, so the
@@ -3284,14 +3396,15 @@ static void desktop_render(uint32_t *buf, uint32_t w, uint32_t h,
     desk_prev_lmb = lmb;
 
     /*
-     * Peek follows the pointer over the taskbar, on a ramp in both
-     * directions so it fades rather than snaps. Not while a drag is in
-     * progress: dragging a window down to the taskbar is how you move it,
-     * and having the desktop dissolve underneath at that moment would be
-     * the opposite of helpful.
+     * Peek chases its latch, on a ramp in both directions so it fades
+     * rather than snaps. Not while a drag is in progress: dragging a
+     * window down to the taskbar is how you move it, and having the
+     * desktop dissolve underneath at that moment would be the opposite
+     * of helpful. Nothing here reads the pointer -- see aero_peek_hold.
      */
     {
-        const int want = dock_hit_bar(mx, my) && wm_drag < 0 && wm_stack_n > 0;
+        if (wm_stack_n == 0) aero_peek_hold = 0;
+        const int want = aero_peek_hold && wm_drag < 0 && wm_stack_n > 0;
         aero_peek += want ? 1 : -1;
         if (aero_peek < 0)         aero_peek = 0;
         if (aero_peek > PEEK_RAMP) aero_peek = PEEK_RAMP;
@@ -3375,6 +3488,7 @@ static void session_end(void) {
         for (int p = 0; p < THUMB_W * THUMB_H; p++) wm_thumb[k][p] = 0;
     }
     aero_peek = 0;
+    aero_peek_hold = 0;
     aero_snap_hint = SNAP_NONE;
     aero_shake_reset();
     jl_open = -1;

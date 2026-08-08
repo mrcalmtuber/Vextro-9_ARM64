@@ -300,7 +300,27 @@ endif
 # for as long as this target existed. Nothing said so: the kernel simply
 # reported no virtio-blk and no virtio-net, which looks exactly like a
 # machine that was meant to have neither.
-QEMU_COMMON = -M virt -m 2048 $(QEMU_CPU) -accel $(ACCEL) \
+# virtualization=on asks QEMU for a board that has EL2 at all; without
+# it `virt` tops out at EL1 and no hypervisor is possible. It cannot be
+# unconditional: Apple's HVF refuses outright --
+#   "HVF does not support providing Virtualization extensions to the
+#    guest CPU"
+# -- so it is offered only under TCG, which does emulate EL2. Whether we
+# then *get* EL2 still depends on what the firmware does before handing
+# over, and kmain reads CurrentEL rather than assuming.
+# Limine refuses to boot at EL2 on a core without VHE --
+#   "PANIC: limine: Booting at EL2 without VHE support is not supported"
+# -- and cortex-a72 is ARMv8.0, so it has none. -cpu max does, and with
+# it the kernel comes up at EL2: verified, kmain prints the level it
+# actually read. Both parts are needed together or the boot panics.
+ifeq ($(ACCEL),tcg)
+QEMU_MACHINE := virt,virtualization=on
+QEMU_CPU := -cpu max
+else
+QEMU_MACHINE := virt
+endif
+
+QEMU_COMMON = -M $(QEMU_MACHINE) -m 2048 $(QEMU_CPU) -accel $(ACCEL) \
 	-drive if=pflash,format=raw,unit=0,readonly=on,file=$(FIRMWARE) \
 	-drive if=pflash,format=raw,unit=1,file=build/efi-vars.fd \
 	$(QEMU_GPU) \

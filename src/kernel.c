@@ -755,6 +755,10 @@ static const vx_export_t kernel_exports[] = {
     { 0, 0 }
 };
 
+/* Which exception level the firmware handed us. Read once in
+ * kmain; the virtualisation window reads it back. */
+int arm_current_el = 1;
+
 void kmain(void) {
 #ifdef BAREMIN
     /*
@@ -805,7 +809,27 @@ void kmain(void) {
     app_region_init();
     mmio_map_init();
 
-    serial_puts("\n[vextro/arm64] kmain reached at EL1\n");
+    /*
+     * The exception level, read rather than asserted. This line used to
+     * say "EL1" as a constant, which is a claim about the firmware's
+     * behaviour that nothing here had checked -- and it is the single
+     * fact that decides whether a hypervisor is possible on this port,
+     * because stage-2 translation and HCR_EL2 only exist at EL2.
+     */
+    {
+        uint64_t el;
+        __asm__ volatile("mrs %0, CurrentEL" : "=r"(el));
+        arm_current_el = (int)((el >> 2) & 3);
+        serial_puts("\n[vextro/arm64] kmain reached at EL");
+        serial_putc((char)('0' + arm_current_el));
+        serial_puts("\n");
+    }
+
+    /* Reads the level above and settles what this port can host. */
+    hv_init();
+    serial_puts("[hv] ");
+    serial_puts(hv.status);
+    serial_puts("\n");
 
     /* Vectors first: from here on a fault says what it was instead of
      * hanging, which matters more the more driver code arrives. */
@@ -1424,6 +1448,26 @@ void kmain(void) {
             login_msg[0] = '\0';
             for (uint32_t i = 0; i < w * h; i++) backbuf[i] = COLOR_BLACK;
         }
+
+#ifdef AUTO_LOGIN
+        /*
+         * Skip the login screen.
+         *
+         * A headless harness cannot get past a password it does not
+         * know, and the volume carries whatever the account was created
+         * with. Off by default and never in a release build; this exists
+         * so screenshots of the desktop can be taken automatically, and
+         * so the two trees can be verified the same way.
+         */
+        if (!desktop_mode) {
+            user_current = 0;
+            session_begin(user_name_of(user_current));
+            desktop_mode = 1;
+            for (uint32_t i = 0; i < w * h; i++) backbuf[i] = COLOR_BLACK;
+            prev_valid = 0;
+            serial_puts("[vextro] AUTO_LOGIN: skipped the login screen\n");
+        }
+#endif
 
         if (desktop_mode) {
             char dch;
