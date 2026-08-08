@@ -534,8 +534,15 @@ brackets that call instead.
 
 ## What is not here
 
-No 3D graphics API — the framebuffer path is 2D only. No video or audio
-codecs, and no audio device on this port at all. No hypervisor, so no
+No 3D graphics *API* — but there is a software rasteriser (`src/v3d.h`
+and the **Solid** app), integer 16.16 with a z-buffer and flat shading
+from real face normals; what is missing is an API over a GPU. No
+compressed-media codecs. **No audio device on this port at all**, so the
+Media Player lists and parses tracks and then says why it is silent, and
+`beep` is compiled out rather than shipped as a command that can never
+work. No hypervisor — but `src/chip8.h` is a complete CHIP-8
+interpreter, all thirty-five opcodes, which is a real emulator for a real
+legacy machine. No hypervisor, so no
 virtualised legacy environment. No TLS, so `https://` is refused rather
 than faked. No device management, no biometrics, no multi-touch, no TV
 tuner, no media streaming — this configuration exposes none of the
