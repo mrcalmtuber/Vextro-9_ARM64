@@ -565,14 +565,14 @@ how much of the same ground they covered.
 AI: Gravity, or gravitation is one of the fundamental forces of the
     universe. It is an attraction, or pull, between any two objects
     with mass.
-Why: every claim above is stated in the entry for Gravity. I dropped
-    1 sentence the entry did not support.
+(1 unsupported sentence dropped)
 Checked twice: a second reading of the same entry agreed on 58%
     of the same facts.
 ```
 
-The models are not named there on purpose: the source is the entry, and
-a model is the thing that read it. Agreement is not proof — both can be
+The answer stands on its own -- nothing cites the entry and nothing
+names the models. The grounding is untouched; this is a change to what
+is printed, not to what is checked. Agreement is not proof — both can be
 wrong about one passage.
 Disagreement is the signal, and it is reported rather than resolved
 silently. `llm check off` turns it off and halves the work.
