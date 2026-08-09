@@ -532,6 +532,27 @@ brackets that call instead.
 
 ---
 
+## A model trained in this repository
+
+`explain.gguf` is 135M parameters, fine-tuned on 42,495 examples built
+out of the encyclopedia itself, to answer from a passage and to say
+"Not in the archive." when the passage does not answer. A fifth of the
+training set is refusals, without which a small model learns that an
+answer is always available.
+
+| | grounded | refusal correct | token-F1 |
+|---|---:|---:|---:|
+| SmolLM2-135M, as downloaded | 35.0% | 26.1% | 0.318 |
+| **fine-tuned** | **77.0%** | **100.0%** | **0.993** |
+
+On this port it answers in about 20 seconds where the 0.5B takes 43.
+`llm use qwen2` switches back. Running it required teaching the kernel
+the llama architecture, and in particular the interleaved rotary
+convention llama GGUFs use — choosing the wrong one leaves the text
+fluent and the numbers wrong.
+
+---
+
 ## What is not here
 
 There is a 3D graphics API — `src/g3d.h`, with pipelines, buffers,
