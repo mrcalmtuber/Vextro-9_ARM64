@@ -553,6 +553,29 @@ fluent and the numbers wrong.
 
 ---
 
+## Both models, at once
+
+The tuned model and the 0.5B are resident together — everything that
+belongs to a model lives in one struct and there are two, so switching is
+an index rather than a reload, and they share the arena. A question goes
+to both; the verifier checks each against the entry; the transcript says
+how much of the same ground they covered.
+
+```
+AI: Gravity, or gravitation is one of the fundamental forces of the
+    universe. It is an attraction, or pull, between any two objects
+    with mass.
+Why: every claim above is stated in the entry for Gravity. I dropped
+    1 sentence the entry did not support.
+Cross-check: /explain.gguf and /qwen2.gguf agree (58% of the same facts).
+```
+
+Agreement is not proof — both can be wrong about one passage.
+Disagreement is the signal, and it is reported rather than resolved
+silently. `llm check off` turns it off and halves the work.
+
+---
+
 ## What is not here
 
 There is a 3D graphics API — `src/g3d.h`, with pipelines, buffers,
