@@ -567,10 +567,13 @@ AI: Gravity, or gravitation is one of the fundamental forces of the
     with mass.
 Why: every claim above is stated in the entry for Gravity. I dropped
     1 sentence the entry did not support.
-Cross-check: /explain.gguf and /qwen2.gguf agree (58% of the same facts).
+Checked twice: a second reading of the same entry agreed on 58%
+    of the same facts.
 ```
 
-Agreement is not proof — both can be wrong about one passage.
+The models are not named there on purpose: the source is the entry, and
+a model is the thing that read it. Agreement is not proof — both can be
+wrong about one passage.
 Disagreement is the signal, and it is reported rather than resolved
 silently. `llm check off` turns it off and halves the work.
 

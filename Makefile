@@ -367,7 +367,7 @@ QEMU_NET := -netdev user,id=n0 -device virtio-net-device,netdev=n0
 # fetching is only needed for a standalone clone of this repository.
 ASSETS ?= ask
 
-ASSET_FILES := assets/wiki.zim assets/qwen2.gguf
+ASSET_FILES := assets/wiki.zim assets/qwen2.gguf assets/explain.gguf
 ASSET_LIST  := build/assets.list
 
 .PHONY: assets
