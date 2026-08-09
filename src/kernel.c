@@ -1115,6 +1115,12 @@ void kmain(void) {
         if (best_len > (16ull << 20)) {
             llm_arena_init((void *)(uintptr_t)(hhdm_request.response->offset
                                                + best_base), best_len);
+            /* Remembered so `llm use` can load a different model without
+             * rebooting: switching resets the arena, which needs the
+             * region it was carved from. */
+            ai_arena_base = (void *)(uintptr_t)(hhdm_request.response->offset
+                                                + best_base);
+            ai_arena_size = best_len;
             serial_puts("[vextro/arm64] llm arena ");
             serial_put_u64(best_len / (1024 * 1024));
             serial_puts(" MiB of ");
